@@ -1,0 +1,9 @@
+# ~/.gitconfig.local  (machine-local, NEVER committed)
+#
+# Copy to ~/.gitconfig.local and set your real identity here. This is included
+# by the tracked ~/.gitconfig and overrides the placeholder values, so your real
+# name/email stay out of the public repo while git still uses them locally.
+
+# [user]
+#     name = Your Name
+#     email = you@example.com

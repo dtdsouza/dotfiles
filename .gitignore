@@ -1,0 +1,28 @@
+# --- real secret / machine-local files (live in $HOME, never tracked) ---
+.zsh_secrets
+.zshrc.local
+.gitconfig.local
+**/hosts.yml
+
+# --- agent state (stow makes ~/.config/nvim a repo symlink -> guard it) ---
+.claude/
+**/.claude/
+.cc-writes/
+
+# --- broad defensive nets ---
+*secret*
+*token*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+.env
+.env.*
+.netrc
+
+# --- but keep the intended templates committable ---
+!*.example
+!.zsh_secrets.example
+!.zshrc.local.example
+!.gitconfig.local.example

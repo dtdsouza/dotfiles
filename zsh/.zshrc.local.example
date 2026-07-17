@@ -1,0 +1,11 @@
+# ~/.zshrc.local  (machine-local, NEVER committed)
+#
+# Copy this file to ~/.zshrc.local for work-specific / non-portable shell config
+# that should not live in a public repo (internal aliases, private functions,
+# host-specific paths). It is sourced at the end of ~/.zshrc.
+
+# Example: a project directory alias
+# alias work='cd ~/workspace/company/project'
+
+# Example: a private tooling function
+# my-tool() { ... }
