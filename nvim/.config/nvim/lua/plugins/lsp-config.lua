@@ -19,8 +19,7 @@ return {
   {
     "neovim/nvim-lspconfig",
     config = function()
-      local lspconfig = require("lspconfig")
-      lspconfig.lua_ls.setup({
+      vim.lsp.config("lua_ls", {
         settings = {
           Lua = {
             diagnostics = {
@@ -30,8 +29,7 @@ return {
         }
       })
 
-      lspconfig.ts_ls.setup({})
-      lspconfig.terraformls.setup({})
+      vim.lsp.enable({ "lua_ls", "ts_ls", "terraformls" })
 
       vim.keymap.set('n', 'K', vim.lsp.buf.hover, {})
       vim.keymap.set('n', 'gd', vim.lsp.buf.definition, { desc = "Go to definition" })
