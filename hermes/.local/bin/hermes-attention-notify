@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+# Play the same attention sound used by Claude Code.
+sound=/usr/share/sounds/sound-icons/glass-water-1.wav
+if command -v aplay >/dev/null 2>&1 && [ -r "$sound" ]; then
+  aplay "$sound" >/dev/null 2>&1 &
+fi
+
+# Ring the originating tmux pane so its window gets the visual bell marker.
+if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
+  pane_tty=$(tmux display-message -p -t "$TMUX_PANE" '#{pane_tty}' 2>/dev/null)
+  if [ -n "$pane_tty" ] && [ -w "$pane_tty" ]; then
+    printf '\a' >"$pane_tty"
+  fi
+fi
+
+exit 0
