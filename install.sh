@@ -15,7 +15,7 @@ set -euo pipefail
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DOTFILES_DIR"
 
-PACKAGES=(zsh tmux nvim git lazygit bash gh hermes)
+PACKAGES=(zsh tmux nvim git lazygit bash gh hermes claude)
 
 echo "==> dotfiles: $DOTFILES_DIR"
 
@@ -59,6 +59,9 @@ clone_plugin zsh-syntax-highlighting https://github.com/zsh-users/zsh-syntax-hig
 clone_plugin zsh-autosuggestions     https://github.com/zsh-users/zsh-autosuggestions.git
 
 # --- 4. Stow every package ---------------------------------------------------
+# Without a real ~/.claude/skills, stow folds ~/.claude itself into a symlink and
+# Claude Code then writes its sessions and settings into this repo.
+mkdir -p "$HOME/.claude/skills"
 echo "==> stowing packages: ${PACKAGES[*]}"
 for pkg in "${PACKAGES[@]}"; do
   [ -d "$DOTFILES_DIR/$pkg" ] || { echo "    skip $pkg (missing)"; continue; }

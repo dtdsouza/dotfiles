@@ -8,6 +8,10 @@
 .claude/
 **/.claude/
 .cc-writes/
+# ...except the claude package's skills, which stow links into ~/.claude/skills
+!/claude/.claude/
+/claude/.claude/*
+!/claude/.claude/skills/
 
 # --- broad defensive nets ---
 *secret*
