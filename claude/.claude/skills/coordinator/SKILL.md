@@ -77,3 +77,5 @@ When the user says the context is getting long, or a batch of tasks just finishe
 ## Status page
 
 `agentctl.sh dashboard` writes a kanban page of every worker tab (needs you, blocked, working, done) to `status.html` next to the ledger and prints its `file://` path. `spawn`, `note`, `done` and `rename` regenerate it in the background. For live updates, ask the user before starting `agentctl.sh dashboard --watch` in a spare tmux tab: it regenerates every 20s and the page reloads itself. Give the user the page's `file://` path (`file://<state-dir>/status.html`, by default under the monorepo's `.claude/coordinator/`) whenever they ask what the agents are doing. It is read-only: nothing on it types into a worker.
+
+The drawer's "Open in terminal" button is a `tmuxjump://` link. It only works after the user runs `agentctl.sh install-jump-handler` once (registers a desktop URL handler that runs `scripts/tmux-jump.sh`); it switches the tmux window but cannot raise the terminal window on GNOME Wayland.

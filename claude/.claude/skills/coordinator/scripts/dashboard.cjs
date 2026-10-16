@@ -127,6 +127,7 @@ body{background:var(--bg);color:var(--white-70);font:400 14px/1.5 var(--body);-w
 h1,h2{font-family:var(--display);font-weight:600;color:#fff;line-height:1.05}
 .pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 10px;font-size:12px;border:1px solid var(--white-10);color:var(--white-70);white-space:nowrap}
 .btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--green-30);border-radius:999px;padding:6px 14px;color:#fff;font:500 12px var(--body);background:transparent;cursor:pointer;white-space:nowrap}
+.btn{text-decoration:none}
 .btn:hover{border-color:var(--green);box-shadow:0 0 18px rgba(186,247,100,.2)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
 .s-working{background:var(--green);box-shadow:0 0 10px rgba(186,247,100,.6)}
@@ -214,7 +215,7 @@ function openDrawer(id) {
       <span>Last active</span><span>\${a.activity ? esc(a.activity) + ' ago' : 'tab closed'}</span></div>
     <h5>Ledger notes</h5><div class="tl">\${a.notes.length ? a.notes.slice().reverse().map(([t, n]) => '<div><b>' + esc(t) + '</b>' + esc(n) + '</div>').join('') : '<div>no notes yet</div>'}</div>
     \${a.snapshot.length ? '<h5>Pane snapshot \\u00b7 ' + esc(GENERATED_AT) + '</h5><pre>' + a.snapshot.map(snapshotLine).join('\\n') + '</pre><div class="hint">Last lines of tmux capture-pane. A \\u276f line may be Claude\\'s grey suggestion, not text the worker typed.</div>' : ''}
-    \${jump ? '<div class="cmd"><code>' + esc(jump) + '</code><button class="btn" data-copy="' + esc(jump) + '">Copy</button></div>' : ''}\`;
+    \${jump ? '<div class="cmd"><code>' + esc(jump) + '</code><button class="btn" data-copy="' + esc(jump) + '">Copy</button><a class="btn" href="tmuxjump://' + encodeURIComponent(a.session) + '/' + a.win + '">Open in terminal</a></div>' : ''}\`;
   document.body.classList.add('open');
   history.replaceState(null, '', '#' + encodeURIComponent(id));
 }

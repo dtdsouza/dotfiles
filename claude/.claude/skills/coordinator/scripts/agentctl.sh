@@ -40,6 +40,7 @@ Usage:
   agentctl.sh done <id> ["<summary>"]       archive the task (drops out of brief and ls)
   agentctl.sh brief                         standing instructions + active tasks with recent notes
   agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 20s
+  agentctl.sh install-jump-handler          register tmuxjump:// links (the page's "Open in terminal" button)
   agentctl.sh coordinator [--model <model>] [--effort <level>] [--name <session-name>]
                           [--compact-window <tokens>]
       Launches the coordinator in the default repo with a SessionStart hook that injects
@@ -373,6 +374,25 @@ cmd_dashboard() {
   return 0
 }
 
+cmd_install_jump_handler() {
+  local apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  local desktop_file="$apps_dir/tmuxjump.desktop" jump_script
+  jump_script="$(dirname "$SCRIPT_PATH")/tmux-jump.sh"
+  mkdir -p "$apps_dir"
+  cat >"$desktop_file" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=tmux jump
+Exec=$jump_script %u
+NoDisplay=true
+Terminal=false
+MimeType=x-scheme-handler/tmuxjump;
+DESKTOP
+  xdg-mime default tmuxjump.desktop x-scheme-handler/tmuxjump
+  update-desktop-database "$apps_dir" 2>/dev/null || true
+  echo "registered tmuxjump:// -> $jump_script"
+}
+
 render_task() {
   local task_dir="$1" notes="$1/notes.md" total
   local id name model effort mode branch workdir created window_id pane_id tab
@@ -460,6 +480,7 @@ main() {
     done) cmd_done "$@" ;;
     brief) cmd_brief "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
+    install-jump-handler) cmd_install_jump_handler ;;
     coordinator) cmd_coordinator "$@" ;;
     _settings) coordinator_settings "${1:-$COORDINATOR_COMPACT_WINDOW}" ;;
     _run) cmd_run "$@" ;;
