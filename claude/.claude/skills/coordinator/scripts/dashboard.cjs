@@ -169,7 +169,7 @@ h1,h2{font-family:var(--display);font-weight:600;color:#fff;line-height:1.05}
 .foot{display:flex;justify-content:space-between;align-items:center}
 .age{font-size:12px;color:var(--white-50)}
 .scrim{position:fixed;inset:0;background:rgba(0,5,22,.55);opacity:0;pointer-events:none;transition:opacity .25s}
-.drawer{position:fixed;top:0;right:0;bottom:0;width:540px;max-width:100vw;border-left:1px solid var(--white-10);background:linear-gradient(var(--surface),var(--bg) 45%);padding:24px 28px;overflow-y:auto;transform:translateX(100%);transition:transform .25s ease}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:540px;max-width:100vw;border-left:1px solid var(--white-10);background:linear-gradient(var(--surface),var(--bg) 45%);padding:24px 28px;overflow-y:auto;overflow-x:hidden;transform:translateX(100%);transition:transform .25s ease}
 body.open .scrim{opacity:1;pointer-events:auto}body.open .drawer{transform:none}
 .dhead{display:flex;align-items:center;justify-content:space-between}
 .x{background:none;border:1px solid var(--white-10);border-radius:999px;color:var(--white-70);width:30px;height:30px;cursor:pointer;font-size:14px}
@@ -186,8 +186,8 @@ h5{font:600 12px var(--body);color:var(--white-50);text-transform:uppercase;lett
 pre{background:var(--surface);border:1px solid var(--white-10);border-radius:16px;padding:14px;font:12px/1.55 var(--mono);color:#e6e9f2;white-space:pre-wrap;word-break:break-word;margin:0}
 .ghost{color:var(--white-50)}
 .hint{font-size:11px;color:var(--white-50);margin-top:6px}
-.cmd{display:flex;gap:8px;align-items:center;margin-top:16px}
-.cmd code{flex:1;background:var(--surface);border:1px solid var(--white-10);border-radius:999px;padding:8px 14px;color:#fff;font:12px var(--mono)}`;
+.cmd{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:16px}
+.cmd code{flex:1 1 100%;min-width:0;background:var(--surface);border:1px solid var(--white-10);border-radius:16px;padding:8px 14px;color:#fff;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-all}`;
 
 const cardHtml = (a) => {
   const cls = a.status === 'blocked' ? 'hot' : a.status === 'review' ? 'ask' : '';
