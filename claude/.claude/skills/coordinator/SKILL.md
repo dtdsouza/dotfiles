@@ -73,3 +73,7 @@ When the user says the context is getting long, or a batch of tasks just finishe
 - SendMessage to a worker to ask for status or pass a follow-up. Workers' transcripts stay out of your context.
 - Workers message you `[<id>] done|blocked|question|progress`. Note it in the ledger, relay it to the user in one or two lines, rename the tab if its state changed, and ask the user only when the worker needs a decision.
 - `setup-failed` means the worktree step errored before claude started; the git error is on screen in that tab.
+
+## Status page
+
+`agentctl.sh dashboard` writes a kanban page of every worker tab (needs you, blocked, working, done) to `status.html` next to the ledger and prints its `file://` path. `spawn`, `note`, `done` and `rename` regenerate it in the background. For live updates, ask the user before starting `agentctl.sh dashboard --watch` in a spare tmux tab: it regenerates every 20s and the page reloads itself. Give the user the page's `file://` path (`file://<state-dir>/status.html`, by default under the monorepo's `.claude/coordinator/`) whenever they ask what the agents are doing. It is read-only: nothing on it types into a worker.

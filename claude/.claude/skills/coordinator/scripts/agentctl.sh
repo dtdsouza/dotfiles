@@ -10,6 +10,8 @@ DEFAULT_REPO="${COORDINATOR_DEFAULT_REPO:-$HOME/workspace/twism/platform/monorep
 STATE_DIR="${COORDINATOR_STATE_DIR:-$DEFAULT_REPO/.claude/coordinator}"
 TASKS_DIR="$STATE_DIR/tasks"
 STANDING_NOTES="$STATE_DIR/notes.md"
+DASHBOARD_FILE="$STATE_DIR/status.html"
+DASHBOARD_REFRESH_SECONDS=20
 # Claude Code keeps at most 10,000 characters of SessionStart hook output in context.
 BRIEF_LIMIT=9500
 NOTES_PER_TASK=5
@@ -37,6 +39,7 @@ Usage:
   agentctl.sh note --standing "<text>"      append an instruction that spans tasks
   agentctl.sh done <id> ["<summary>"]       archive the task (drops out of brief and ls)
   agentctl.sh brief                         standing instructions + active tasks with recent notes
+  agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 20s
   agentctl.sh coordinator [--model <model>] [--effort <level>] [--name <session-name>]
                           [--compact-window <tokens>]
       Launches the coordinator in the default repo with a SessionStart hook that injects
@@ -71,6 +74,11 @@ caller_session() {
   else
     echo twism
   fi
+}
+
+# Fire-and-forget: the page is a convenience and must never fail or slow the calling command.
+refresh_dashboard() {
+  (node "$(dirname "$SCRIPT_PATH")/dashboard.cjs" "$STATE_DIR" "$DASHBOARD_FILE" </dev/null >/dev/null 2>&1 &) || true
 }
 
 update_meta() {
@@ -160,6 +168,7 @@ cmd_spawn() {
   pane_id="${created#* }"
   name_window "$window_id" "$name"
   update_meta "$task_dir" --arg w "$window_id" --arg p "$pane_id" '.windowId=$w | .paneId=$p'
+  refresh_dashboard
   echo "spawned $id -> tab '$name' ($session $window_id $pane_id, $model, $mode: $workdir)"
 }
 
@@ -258,6 +267,7 @@ cmd_rename() {
   if [[ -n $task_dir ]]; then
     update_meta "$task_dir" --arg n "$name" '.name=$n'
   fi
+  refresh_dashboard
   echo "renamed $window_id -> '$name'"
 }
 
@@ -325,6 +335,7 @@ cmd_note() {
     file="$(require_task "$target")/notes.md"
   fi
   printf -- '- %s %s\n' "$(stamp)" "$*" >>"$file"
+  refresh_dashboard
   echo "noted in ${file/#$HOME/~}"
 }
 
@@ -340,7 +351,26 @@ cmd_done() {
     name="$(tmux display-message -p -t "$window_id" '#{window_name}' | sed -E 's/-(blocked|review|done)$//')"
     cmd_rename "$window_id" "$name-done"
   fi
+  refresh_dashboard
   echo "archived $id"
+}
+
+cmd_dashboard() {
+  local generator
+  generator="$(dirname "$SCRIPT_PATH")/dashboard.cjs"
+  case "${1:-}" in
+    "") node "$generator" "$STATE_DIR" "$DASHBOARD_FILE" ;;
+    --watch)
+      echo "[agentctl] regenerating file://$DASHBOARD_FILE every ${DASHBOARD_REFRESH_SECONDS}s (ctrl-c to stop)"
+      while true; do
+        node "$generator" "$STATE_DIR" "$DASHBOARD_FILE" || echo "[agentctl] dashboard generation failed"
+        sleep "$DASHBOARD_REFRESH_SECONDS"
+      done
+      ;;
+    *) die "usage: dashboard [--watch]" ;;
+  esac
+  [[ -z ${1:-} ]] && echo "file://$DASHBOARD_FILE"
+  return 0
 }
 
 render_task() {
@@ -429,6 +459,7 @@ main() {
     note) cmd_note "$@" ;;
     done) cmd_done "$@" ;;
     brief) cmd_brief "$@" ;;
+    dashboard) cmd_dashboard "$@" ;;
     coordinator) cmd_coordinator "$@" ;;
     _settings) coordinator_settings "${1:-$COORDINATOR_COMPACT_WINDOW}" ;;
     _run) cmd_run "$@" ;;
