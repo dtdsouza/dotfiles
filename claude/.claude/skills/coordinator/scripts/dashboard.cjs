@@ -11,9 +11,10 @@ if (!STATE_DIR) {
 }
 const OUT = process.argv[3] || path.join(STATE_DIR, 'status.html');
 const TASKS_DIR = path.join(STATE_DIR, 'tasks');
-const REFRESH_SECONDS = 20;
+const PAGE_RELOAD_SECONDS = 300;
+const STALE_ON_FOCUS_SECONDS = 60;
 // tmux replaces control characters such as \x1f with '_' in -F output, hence the printable '|' separator (name last).
-const ARCHIVE_WINDOW_DAYS = 7;
+const ARCHIVE_WINDOW_DAYS = 30;
 const SNAPSHOT_LINES = 30;
 const SNAPSHOT_LINE_WIDTH = 160;
 const SUFFIX_STATUS = { review: 'review', blocked: 'blocked', done: 'done' };
@@ -134,6 +135,15 @@ h1,h2{font-family:var(--display);font-weight:600;color:#fff;line-height:1.05}
 .pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 10px;font-size:12px;border:1px solid var(--white-10);color:var(--white-70);white-space:nowrap}
 .btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--green-30);border-radius:999px;padding:6px 14px;color:#fff;font:500 12px var(--body);background:transparent;cursor:pointer;white-space:nowrap}
 .btn{text-decoration:none}
+.btn.on,.chip.on{border-color:var(--green);background:rgba(186,247,100,.12)}
+.topbar .right{display:flex;align-items:center;gap:16px}
+.filters{display:flex;gap:6px;flex-wrap:wrap;padding:0 6px 14px}
+.chip{border:1px solid var(--white-10);border-radius:999px;padding:3px 11px;font:500 12px var(--body);color:var(--white-70);background:transparent;cursor:pointer}
+.chip:hover{border-color:rgba(255,255,255,.3)}
+.custom{display:flex;gap:6px;align-items:center;width:100%;margin-top:4px;font-size:12px}
+.custom input{color-scheme:dark;background:var(--surface);border:1px solid var(--white-10);border-radius:999px;color:#fff;padding:3px 10px;font:12px var(--body)}
+.empty{font-size:12px;color:var(--white-50);padding:6px}
+[hidden]{display:none!important}
 .btn:hover{border-color:var(--green);box-shadow:0 0 18px rgba(186,247,100,.2)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
 .s-working{background:var(--green);box-shadow:0 0 10px rgba(186,247,100,.6)}
@@ -184,12 +194,16 @@ const cardHtml = (a) => {
   const body = a.summary ? `<div class="${a.status === 'working' || a.status === 'done' ? 'line' : 'q'}">${esc(a.summary)}</div>` : '';
   const meta = a.status === 'done' && a.win === '-' ? '' : `<div class="row"><span class="pill">${esc(a.win)}</span><span class="pill">${esc(a.model)}/${esc(a.effort)}</span>${a.ctx ? `<span class="pill">ctx ${esc(a.ctx)}% left</span>` : ''}</div>`;
   const age = a.activity ? (a.activity === 'now' ? 'active now' : `active ${a.activity} ago`) : a.closedAgo ? `done ${a.closedAgo === 'now' ? 'just now' : a.closedAgo + ' ago'}` : 'tab closed';
-  return `<div class="card ${cls}" data-id="${esc(a.id)}"><h4>${esc(a.tab)}</h4>${meta}${body}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span><span class="btn">Details →</span></div></div>`;
+  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}"><h4>${esc(a.tab)}</h4>${meta}${body}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span><span class="btn">Details →</span></div></div>`;
 };
+
+const FILTERS_HTML = `<div class="filters"><button class="chip" data-range="today">Today</button><button class="chip" data-range="7">7 days</button><button class="chip" data-range="30">30 days</button><button class="chip" data-range="all">All</button><button class="chip" data-range="custom">Custom</button>
+<div class="custom" hidden><input type="date" data-from> <span>to</span> <input type="date" data-to></div></div><div class="empty" hidden>No sessions in this range.</div>`;
 
 const columnHtml = (items, [title, dotClass, status]) => {
   const list = items.filter((a) => a.status === status);
-  return `<div class="col"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count">${list.length}</span></div>${list.map(cardHtml).join('')}</div>`;
+  const filters = status === 'done' ? FILTERS_HTML : '';
+  return `<div class="col" data-status="${status}"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count" data-total="${list.length}">${list.length}</span></div>${filters}${list.map(cardHtml).join('')}</div>`;
 };
 
 const COLUMNS = [
@@ -202,6 +216,8 @@ const COLUMNS = [
 const clientScript = (items, generatedAt) => `
 const ITEMS = ${JSON.stringify(Object.fromEntries(items.map((a) => [a.id, a]))).replace(/</g, '\\u003c')};
 const GENERATED_AT = ${JSON.stringify(generatedAt)};
+const GENERATED_MS = ${Date.now()};
+const STALE_MS = ${STALE_ON_FOCUS_SECONDS * 1000};
 const LABEL = { working: 'working', review: 'needs you', blocked: 'blocked', done: 'done' };
 const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const snapshotLine = (l) => l.trimStart().startsWith('❯') ? '<span class="ghost">' + esc(l) + '  ← prompt line: may be a ghost suggestion</span>' : esc(l);
@@ -232,7 +248,45 @@ function closeDrawer() {
   document.querySelectorAll('.card.sel').forEach((c) => c.classList.remove('sel'));
   history.replaceState(null, '', location.pathname);
 }
+const FILTER_KEY = 'agents.doneFilter';
+const readFilter = () => { try { return JSON.parse(localStorage.getItem(FILTER_KEY)) || { range: 'today' }; } catch (_) { return { range: 'today' }; } };
+const writeFilter = (f) => { try { localStorage.setItem(FILTER_KEY, JSON.stringify(f)); } catch (_) {} };
+let filter = readFilter();
+const daysAgoStart = (n) => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate() - n).getTime(); };
+const filterBounds = (f) => {
+  if (f.range === 'today') return [daysAgoStart(0), Infinity];
+  if (f.range === '7') return [daysAgoStart(6), Infinity];
+  if (f.range === '30') return [daysAgoStart(29), Infinity];
+  if (f.range === 'custom') return [f.from ? new Date(f.from + 'T00:00:00').getTime() : -Infinity, f.to ? new Date(f.to + 'T23:59:59.999').getTime() : Infinity];
+  return [-Infinity, Infinity];
+};
+function applyFilter() {
+  const col = document.querySelector('[data-status="done"]');
+  const [lo, hi] = filterBounds(filter);
+  const cards = [...col.querySelectorAll('.card')];
+  cards.forEach((c) => { const t = Number(c.dataset.updated) * 1000; c.hidden = !(t >= lo && t <= hi); });
+  const shown = cards.filter((c) => !c.hidden).length;
+  col.querySelector('.count').textContent = shown === cards.length ? String(cards.length) : shown + ' of ' + cards.length;
+  col.querySelector('.empty').hidden = shown > 0;
+  col.querySelectorAll('.chip').forEach((b) => b.classList.toggle('on', b.dataset.range === filter.range));
+  const custom = col.querySelector('.custom');
+  custom.hidden = filter.range !== 'custom';
+  custom.querySelector('[data-from]').value = filter.from || '';
+  custom.querySelector('[data-to]').value = filter.to || '';
+}
+function setFilter(next) { filter = next; writeFilter(filter); applyFilter(); }
+document.addEventListener('change', (e) => {
+  if (e.target.matches('[data-from], [data-to]')) {
+    const custom = e.target.closest('.custom');
+    setFilter({ range: 'custom', from: custom.querySelector('[data-from]').value, to: custom.querySelector('[data-to]').value });
+  }
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - GENERATED_MS > STALE_MS) location.reload(); });
 document.addEventListener('click', (e) => {
+  const refresh = e.target.closest('#refresh');
+  if (refresh) { refresh.textContent = 'Refreshing…'; setTimeout(() => location.reload(), 1500); return; }
+  const chip = e.target.closest('[data-range]');
+  if (chip) return setFilter({ ...filter, range: chip.dataset.range });
   const copy = e.target.closest('[data-copy]');
   if (copy) { navigator.clipboard?.writeText(copy.dataset.copy).then(() => { copy.textContent = 'Copied'; setTimeout(() => (copy.textContent = 'Copy'), 1200); }); return; }
   if (e.target.closest('.x') || e.target.classList.contains('scrim')) return closeDrawer();
@@ -240,6 +294,7 @@ document.addEventListener('click', (e) => {
   if (card) openDrawer(card.dataset.id);
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+applyFilter();
 if (location.hash) openDrawer(decodeURIComponent(location.hash.slice(1)));
 `;
 
@@ -247,12 +302,12 @@ const render = (items) => {
   const generatedAt = new Date().toLocaleTimeString('en-GB', { hour12: false });
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="${REFRESH_SECONDS}">
+<meta http-equiv="refresh" content="${PAGE_RELOAD_SECONDS}">
 <title>Agents</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
 <style>${css}</style></head><body>
-<div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="meta">snapshot ${generatedAt} · reloads every ${REFRESH_SECONDS}s · click a card for details</div></div>
+<div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right"><div class="meta">snapshot ${generatedAt} · reloads every ${PAGE_RELOAD_SECONDS / 60} min · click a card for details</div><a class="btn" id="refresh" href="tmuxjump://refresh">↻ Refresh</a></div></div>
 <div class="board">${COLUMNS.map((c) => columnHtml(items, c)).join('')}</div>
 <div class="scrim"></div><aside class="drawer"></aside>
 <script>${clientScript(items, generatedAt)}</script></body></html>`;

@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Handler for tmuxjump://<session>/<@window> links from the status page. Opens a new terminal
-# window on that tmux window; the existing terminal is left alone.
+# Handler for tmuxjump:// links from the status page: opens a new terminal on a tmux window (the
+# existing terminal is left alone), resumes a closed task, or regenerates the page.
 set -euo pipefail
 
 # TMUX_JUMP_TERMINAL is unquoted on purpose: it holds a command plus its arguments.
 # shellcheck disable=SC2086
 terminal() { setsid ${TMUX_JUMP_TERMINAL:-gnome-terminal --} "$@" >/dev/null 2>&1 & }
 
-if [[ ${1:-} =~ ^tmuxjump://resume/([A-Za-z0-9._-]+)$ ]]; then
+if [[ ${1:-} == tmuxjump://refresh ]]; then
+  bash "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/agentctl.sh" dashboard >/dev/null 2>&1 || true
+  exit 0
+elif [[ ${1:-} =~ ^tmuxjump://resume/([A-Za-z0-9._-]+)$ ]]; then
   terminal bash "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/agentctl.sh" resume "${BASH_REMATCH[1]}"
   exit 0
 elif [[ ${1:-} =~ ^tmuxjump://([A-Za-z0-9_-]+)/(@[0-9]+)$ ]]; then

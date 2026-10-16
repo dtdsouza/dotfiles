@@ -11,7 +11,7 @@ STATE_DIR="${COORDINATOR_STATE_DIR:-$DEFAULT_REPO/.claude/coordinator}"
 TASKS_DIR="$STATE_DIR/tasks"
 STANDING_NOTES="$STATE_DIR/notes.md"
 DASHBOARD_FILE="$STATE_DIR/status.html"
-DASHBOARD_REFRESH_SECONDS=20
+DASHBOARD_REFRESH_SECONDS=300
 # Claude Code keeps at most 10,000 characters of SessionStart hook output in context.
 BRIEF_LIMIT=9500
 NOTES_PER_TASK=5
@@ -39,7 +39,7 @@ Usage:
   agentctl.sh note --standing "<text>"      append an instruction that spans tasks
   agentctl.sh done <id> ["<summary>"]       archive the task (drops out of brief and ls)
   agentctl.sh brief                         standing instructions + active tasks with recent notes
-  agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 20s
+  agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 5 min
   agentctl.sh resume <id>                   new tmux session in the task's workdir running `claude --resume <id>`
   agentctl.sh install-jump-handler          register tmuxjump:// links (the page's "Open in terminal" button)
   agentctl.sh coordinator [--model <model>] [--effort <level>] [--name <session-name>]
