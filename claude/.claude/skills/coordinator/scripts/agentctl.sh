@@ -40,6 +40,7 @@ Usage:
   agentctl.sh done <id> ["<summary>"]       archive the task (drops out of brief and ls)
   agentctl.sh brief                         standing instructions + active tasks with recent notes
   agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 20s
+  agentctl.sh resume <id>                   new tmux session in the task's workdir running `claude --resume <id>`
   agentctl.sh install-jump-handler          register tmuxjump:// links (the page's "Open in terminal" button)
   agentctl.sh coordinator [--model <model>] [--effort <level>] [--name <session-name>]
                           [--compact-window <tokens>]
@@ -374,6 +375,20 @@ cmd_dashboard() {
   return 0
 }
 
+cmd_resume() {
+  (($# == 1)) || die "usage: resume <id>"
+  local id="$1" task_dir workdir
+  export PATH="$HOME/.local/bin:$PATH"
+  task_dir="$(require_task "$id")"
+  workdir="$(jq -r '.workdir // ""' "$task_dir/meta.json")"
+  if [[ ! -d $workdir ]]; then
+    echo "agentctl: workdir of '$id' is gone ($workdir); its session can't be resumed from here" >&2
+    [[ -t 0 ]] && read -rp "press enter to close"
+    exit 1
+  fi
+  exec tmux new-session -A -s "resume-$id" -c "$workdir" "claude --resume $(printf %q "$id")"
+}
+
 cmd_install_jump_handler() {
   local apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
   local desktop_file="$apps_dir/tmuxjump.desktop" jump_script
@@ -480,6 +495,7 @@ main() {
     done) cmd_done "$@" ;;
     brief) cmd_brief "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
+    resume) cmd_resume "$@" ;;
     install-jump-handler) cmd_install_jump_handler ;;
     coordinator) cmd_coordinator "$@" ;;
     _settings) coordinator_settings "${1:-$COORDINATOR_COMPACT_WINDOW}" ;;

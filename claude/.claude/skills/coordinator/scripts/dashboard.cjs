@@ -13,6 +13,7 @@ const OUT = process.argv[3] || path.join(STATE_DIR, 'status.html');
 const TASKS_DIR = path.join(STATE_DIR, 'tasks');
 const REFRESH_SECONDS = 20;
 // tmux replaces control characters such as \x1f with '_' in -F output, hence the printable '|' separator (name last).
+const ARCHIVE_WINDOW_DAYS = 7;
 const SNAPSHOT_LINES = 30;
 const SNAPSHOT_LINE_WIDTH = 160;
 const SUFFIX_STATUS = { review: 'review', blocked: 'blocked', done: 'done' };
@@ -105,6 +106,8 @@ const buildItem = ({ meta, phase, notes }, win) => {
     since: (meta.createdAt || '').slice(0, 16).replace('T', ' '),
     phase,
     activity: win ? ago(win.activity) : '',
+    updated: win ? win.activity : Math.floor(Date.parse(meta.archivedAt || meta.createdAt) / 1000) || 0,
+    closedAgo: !win && meta.archivedAt ? ago(Math.floor(Date.parse(meta.archivedAt) / 1000)) : '',
     summary: lastNote,
     notes,
     snapshot,
@@ -112,11 +115,14 @@ const buildItem = ({ meta, phase, notes }, win) => {
   };
 };
 
+const isRecent = (iso) => Date.now() - Date.parse(iso) < ARCHIVE_WINDOW_DAYS * 86400 * 1000;
+
 const collectItems = () => {
   const windows = readWindows();
   return readTasks()
-    .filter((t) => t.meta.id && (!t.meta.archivedAt || windows.has(t.meta.windowId)))
-    .map((t) => buildItem(t, windows.get(t.meta.windowId)));
+    .filter((t) => t.meta.id && (!t.meta.archivedAt || windows.has(t.meta.windowId) || isRecent(t.meta.archivedAt)))
+    .map((t) => buildItem(t, windows.get(t.meta.windowId)))
+    .sort((a, b) => b.updated - a.updated);
 };
 
 const css = `:root{--bg:#000516;--surface:#0c1121;--white-70:rgba(255,255,255,.7);--white-50:rgba(255,255,255,.5);--white-10:rgba(255,255,255,.1);--white-05:rgba(255,255,255,.05);
@@ -177,7 +183,7 @@ const cardHtml = (a) => {
   const cls = a.status === 'blocked' ? 'hot' : a.status === 'review' ? 'ask' : '';
   const body = a.summary ? `<div class="${a.status === 'working' || a.status === 'done' ? 'line' : 'q'}">${esc(a.summary)}</div>` : '';
   const meta = a.status === 'done' && a.win === '-' ? '' : `<div class="row"><span class="pill">${esc(a.win)}</span><span class="pill">${esc(a.model)}/${esc(a.effort)}</span>${a.ctx ? `<span class="pill">ctx ${esc(a.ctx)}% left</span>` : ''}</div>`;
-  const age = a.activity ? (a.activity === 'now' ? 'active now' : `active ${a.activity} ago`) : 'tab closed';
+  const age = a.activity ? (a.activity === 'now' ? 'active now' : `active ${a.activity} ago`) : a.closedAgo ? `done ${a.closedAgo === 'now' ? 'just now' : a.closedAgo + ' ago'}` : 'tab closed';
   return `<div class="card ${cls}" data-id="${esc(a.id)}"><h4>${esc(a.tab)}</h4>${meta}${body}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span><span class="btn">Details →</span></div></div>`;
 };
 
@@ -203,7 +209,9 @@ const drawer = document.querySelector('.drawer');
 function openDrawer(id) {
   const a = ITEMS[id]; if (!a) return;
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('sel', c.dataset.id === id));
-  const jump = a.win === '-' ? '' : 'tmux select-window -t ' + a.session + ':' + a.win;
+  const live = a.win !== '-';
+  const jump = live ? 'tmux select-window -t ' + a.session + ':' + a.win : 'cd ' + a.where + ' && claude --resume ' + a.id;
+  const jumpHref = live ? 'tmuxjump://' + encodeURIComponent(a.session) + '/' + a.win : 'tmuxjump://resume/' + encodeURIComponent(a.id);
   const ask = (a.status === 'review' || a.status === 'blocked') && a.summary ? '<div class="askbox ' + a.status + '">' + esc(a.summary) + '</div>' : '';
   drawer.innerHTML = \`
     <div class="dhead"><span class="pill"><span class="dot s-\${a.status}"></span>\${LABEL[a.status]}\${a.win !== '-' ? ' \\u00b7 ' + esc(a.win) + ' \\u00b7 ' + esc(a.pane) : ''}</span><button class="x" title="Close (Esc)">\\u2715</button></div>
@@ -212,10 +220,10 @@ function openDrawer(id) {
     <div class="kv"><span>Task id</span><span>\${esc(a.id)}</span><span>Workdir</span><span>\${esc(a.where)}</span>
       <span>Model</span><span>\${esc(a.model)}/\${esc(a.effort)}\${a.ctx ? ' \\u00b7 ctx ' + esc(a.ctx) + '% left' : ''}</span>
       <span>Phase</span><span>\${esc(a.phase || '-')}</span><span>Since</span><span>\${esc(a.since)}</span>
-      <span>Last active</span><span>\${a.activity ? esc(a.activity) + ' ago' : 'tab closed'}</span></div>
+      <span>Last active</span><span>\${a.activity ? esc(a.activity) + ' ago' : a.closedAgo ? 'archived ' + esc(a.closedAgo) + ' ago, tab closed' : 'tab closed'}</span></div>
     <h5>Ledger notes</h5><div class="tl">\${a.notes.length ? a.notes.slice().reverse().map(([t, n]) => '<div><b>' + esc(t) + '</b>' + esc(n) + '</div>').join('') : '<div>no notes yet</div>'}</div>
     \${a.snapshot.length ? '<h5>Pane snapshot \\u00b7 ' + esc(GENERATED_AT) + '</h5><pre>' + a.snapshot.map(snapshotLine).join('\\n') + '</pre><div class="hint">Last lines of tmux capture-pane. A \\u276f line may be Claude\\'s grey suggestion, not text the worker typed.</div>' : ''}
-    \${jump ? '<div class="cmd"><code>' + esc(jump) + '</code><button class="btn" data-copy="' + esc(jump) + '">Copy</button><a class="btn" href="tmuxjump://' + encodeURIComponent(a.session) + '/' + a.win + '">Open in terminal</a></div>' : ''}\`;
+    \${jump ? '<div class="cmd"><code>' + esc(jump) + '</code><button class="btn" data-copy="' + esc(jump) + '">Copy</button><a class="btn" href="' + esc(jumpHref) + '">' + (live ? 'Open in terminal' : 'Resume in terminal') + '</a></div>' : ''}\`;
   document.body.classList.add('open');
   history.replaceState(null, '', '#' + encodeURIComponent(id));
 }
