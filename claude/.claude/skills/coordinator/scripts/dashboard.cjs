@@ -20,8 +20,10 @@ const SNAPSHOT_LINES = 30;
 const SNAPSHOT_LINE_WIDTH = 160;
 // Reloads restart CSS animations, so a head script derives the shimmer's phase from the clock to keep it continuous.
 const SHIMMER_MS = 2400;
-const CTX_LOW_PERCENT = 30;
-const CTX_CRITICAL_PERCENT = 15;
+const CTX_HIGH_USED_PERCENT = 70;
+const CTX_CRITICAL_USED_PERCENT = 85;
+const NOTE_PREVIEW_CHARS = 220;
+const MODEL_FAMILIES = ['opus', 'sonnet', 'fable', 'haiku'];
 const SUFFIX_STATUS = { review: 'review', blocked: 'blocked', done: 'done' };
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -46,11 +48,20 @@ const readTasks = () => {
     const dir = path.join(TASKS_DIR, id);
     try {
       const meta = JSON.parse(readText(path.join(dir, 'meta.json')));
-      return [{ meta, phase: readText(path.join(dir, 'phase')).trim(), notes: parseNotes(readText(path.join(dir, 'notes.md'))) }];
+      return [{ meta, phase: readText(path.join(dir, 'phase')).trim(), notes: parseNotes(readText(path.join(dir, 'notes.md'))), goal: parseGoal(readText(path.join(dir, 'brief.md'))) }];
     } catch {
       return [];
     }
   });
+};
+
+const plainMarkdown = (text) => text.replace(/\*\*|__|`/g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/\s+/g, ' ').trim();
+
+const parseGoal = (brief) => {
+  const section = brief.match(/^## Goal[^\n]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m);
+  const paragraph = section ? section[1].trim().split(/\n\s*\n/)[0] : '';
+  const fallback = (brief.match(/^# (.+)$/m) || [])[1] || '';
+  return plainMarkdown((paragraph || fallback).replace(/^\s*[-*] /gm, ''));
 };
 
 const parseNotes = (text) =>
@@ -86,7 +97,7 @@ const ago = (epochSeconds) => {
   return `${Math.floor(s / 86400)}d`;
 };
 
-const buildItem = ({ meta, phase, notes }, win) => {
+const buildItem = ({ meta, phase, notes, goal }, win) => {
   const suffix = win && win.name.match(/-(review|blocked|done)$/);
   const tabClosed = !win;
   const status = tabClosed ? 'done' : suffix ? SUFFIX_STATUS[suffix[1]] : 'working';
@@ -115,6 +126,7 @@ const buildItem = ({ meta, phase, notes }, win) => {
     updated: win ? win.activity : Math.floor(Date.parse(meta.archivedAt || meta.createdAt) / 1000) || 0,
     closedAgo: !win && meta.archivedAt ? ago(Math.floor(Date.parse(meta.archivedAt) / 1000)) : '',
     summary: lastNote,
+    goal,
     notes,
     snapshot,
     flags,
@@ -133,11 +145,11 @@ const collectItems = () => {
 
 const css = `:root{color-scheme:dark;--bg:#000516;--surface:#0c1121;--fg:#fff;--text:rgba(255,255,255,.7);--muted:rgba(255,255,255,.55);--line:rgba(255,255,255,.1);--soft:rgba(255,255,255,.05);--edge:rgba(255,255,255,.25);
 --green:#baf764;--green-ink:#baf764;--green-30:rgba(186,247,100,.3);--green-12:rgba(186,247,100,.12);--blue-glow:#4a74ff;--amber:#ffc65c;--red:#ff6b6b;--red-45:rgba(255,107,107,.45);--stripe:rgba(255,107,107,.07);
---card-sheen:rgba(255,255,255,.05);--scrim:rgba(0,5,22,.55);--pre:#e6e9f2;
+--card-sheen:rgba(255,255,255,.05);--opus:#c7a6ff;--sonnet:#ffae7d;--fable:#ff9bd6;--haiku:#72d9cd;--scrim:rgba(0,5,22,.55);--pre:#e6e9f2;
 --display:"Clash Display",Arial,sans-serif;--body:Inter,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
 @media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f4f6fb;--surface:#fff;--fg:#0b1020;--text:rgba(11,16,32,.78);--muted:rgba(11,16,32,.62);--line:rgba(11,16,32,.12);--soft:rgba(11,16,32,.04);--edge:rgba(11,16,32,.3);
 --green-ink:#3f6b0a;--green-30:rgba(63,107,10,.35);--green-12:rgba(122,190,30,.14);--blue-glow:#2f5bff;--amber:#9a6200;--red:#d93636;--red-45:rgba(217,54,54,.5);--stripe:rgba(217,54,54,.07);
---card-sheen:rgba(11,16,32,.03);--scrim:rgba(11,16,32,.3);--pre:#1b2235}}
+--card-sheen:rgba(11,16,32,.03);--opus:#6a3ed1;--sonnet:#a24c10;--fable:#a7306d;--haiku:#0b7066;--scrim:rgba(11,16,32,.3);--pre:#1b2235}}
 *{box-sizing:border-box;margin:0}
 body{background:var(--bg);color:var(--text);font:400 14px/1.5 var(--body);-webkit-font-smoothing:antialiased;letter-spacing:-.01em}
 h1,h2{font-family:var(--display);font-weight:600;color:var(--fg);line-height:1.05}
@@ -177,23 +189,29 @@ h1,h2{font-family:var(--display);font-weight:600;color:var(--fg);line-height:1.0
 .card.done.open{border-color:var(--green-30);background:linear-gradient(90deg,var(--green-12),transparent 55%)}
 .card.done.open::before{content:"";position:absolute;left:0;top:18px;bottom:18px;width:3px;border-radius:0 3px 3px 0;background:var(--green-ink)}
 .card.done.closed{border-color:var(--green-12);background:none}
-.card.done.closed h4{color:var(--text)}.card.done.closed .line{color:var(--muted)}
+.card.done.closed h4,.card.done.closed .goal{color:var(--text)}.card.done.closed .line{color:var(--muted)}
 .card.sel{border-color:var(--green-ink);box-shadow:0 0 24px var(--green-12)}
 .card h4{font:600 14px var(--body);color:var(--fg);margin-bottom:8px;word-break:break-word}
+.card h4 .wid{font:400 11px var(--mono);color:var(--muted);margin-left:6px;white-space:nowrap}
 .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
 .tag{display:inline-flex;align-items:center;gap:5px;border-radius:6px;padding:1px 7px;font:500 11px/18px var(--body);background:var(--soft);border:1px solid var(--line);color:var(--text);white-space:nowrap}
-.tag.mono{font-family:var(--mono);color:var(--muted)}
+.tag[class*="m-"]{color:var(--model);border-color:color-mix(in srgb,var(--model) 40%,transparent);background:color-mix(in srgb,var(--model) 10%,transparent)}
+.m-opus{--model:var(--opus)}.m-sonnet{--model:var(--sonnet)}.m-fable{--model:var(--fable)}.m-haiku{--model:var(--haiku)}
 .tag.live{color:var(--green-ink);border-color:var(--green-30)}
 .tag.live::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--green-ink)}
 .meter{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin:-2px 0 12px}
 .meter .bar{flex:1;height:3px;border-radius:3px;background:var(--line);overflow:hidden}
 .meter .bar i{display:block;height:100%;border-radius:3px;background:var(--green-ink)}
-.meter.low .bar i{background:var(--amber)}.meter.critical .bar i{background:var(--red)}
-.line{font-size:13px;margin-bottom:12px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.meter.high .bar i{background:var(--amber)}.meter.critical .bar i{background:var(--red)}
+.goal{font-size:13px;color:var(--fg);margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.line{font-size:12px;color:var(--muted);margin-bottom:12px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
 .q{font-size:13px;color:var(--fg);background:var(--soft);border-left:2px solid var(--blue-glow);border-radius:8px;padding:8px 10px;margin-bottom:12px;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
 .card.blocked .q{border-left-color:var(--red);background:var(--surface)}
 .warn{font-size:12px;color:var(--amber);margin-bottom:10px}
-.foot{display:flex;justify-content:space-between;align-items:center}
+.foot{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.mini{border:1px solid var(--line);border-radius:999px;padding:2px 10px;font:500 11px/18px var(--body);color:var(--muted);background:transparent;cursor:pointer;white-space:nowrap}
+.mini:hover{color:var(--fg);border-color:var(--edge)}
+.drawer .goal{display:block;margin:4px 0 8px}
 .age{font-size:12px;color:var(--muted)}
 .scrim{position:fixed;inset:0;background:var(--scrim);opacity:0;pointer-events:none;transition:opacity .25s}
 .drawer{position:fixed;top:0;right:0;bottom:0;width:540px;max-width:100vw;border-left:1px solid var(--line);background:linear-gradient(var(--surface),var(--bg) 45%);padding:24px 28px;overflow-y:auto;overflow-x:hidden;transform:translateX(100%);transition:transform .25s ease}
@@ -220,19 +238,35 @@ pre{background:var(--surface);border:1px solid var(--line);border-radius:16px;pa
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.card.working::after{background-position:50% 0}}`;
 
 const ctxMeterHtml = (ctx) => {
-  const left = Number(ctx);
-  const level = left <= CTX_CRITICAL_PERCENT ? 'critical' : left <= CTX_LOW_PERCENT ? 'low' : '';
-  return `<div class="meter ${level}" title="context window: ${left}% left"><span class="bar"><i style="width:${left}%"></i></span><span>ctx ${left}% left</span></div>`;
+  const used = 100 - Number(ctx);
+  const level = used >= CTX_CRITICAL_USED_PERCENT ? 'critical' : used >= CTX_HIGH_USED_PERCENT ? 'high' : '';
+  return `<div class="meter ${level}" title="context window: ${used}% used"><span class="bar"><i style="width:${used}%"></i></span><span>ctx ${used}% used</span></div>`;
+};
+
+const modelClass = (model) => {
+  const family = MODEL_FAMILIES.find((f) => String(model).toLowerCase().includes(f));
+  return family ? ` m-${family}` : '';
+};
+
+const jumpCommand = (a) => (a.win !== '-' ? `tmux select-window -t ${a.session}:${a.win}` : `cd ${a.where} && claude --resume ${a.id}`);
+
+const trimNote = (note) => {
+  const flat = note.replace(/\s+/g, ' ').trim();
+  return flat.length > NOTE_PREVIEW_CHARS ? `${flat.slice(0, NOTE_PREVIEW_CHARS - 1)}…` : flat;
 };
 
 const cardHtml = (a) => {
   const live = a.win !== '-';
   const cls = a.status === 'done' ? `done ${live ? 'open' : 'closed'}` : a.status === 'review' ? 'ask' : a.status;
-  const body = a.summary ? `<div class="${a.status === 'working' || a.status === 'done' ? 'line' : 'q'}">${esc(a.summary)}</div>` : '';
+  const goal = a.goal ? `<div class="goal">${esc(a.goal)}</div>` : '';
+  const note = a.summary ? `<div class="${a.status === 'review' || a.status === 'blocked' ? 'q' : 'line'}">${esc(trimNote(a.summary))}</div>` : '';
   const liveTag = a.status === 'done' ? '<span class="tag live">tab open</span>' : '';
-  const meta = live ? `<div class="row">${liveTag}<span class="tag mono">${esc(a.win)}</span><span class="tag">${esc(a.model)}</span><span class="tag">${esc(a.effort)}</span></div>${a.ctx ? ctxMeterHtml(a.ctx) : ''}` : '';
+  const meta = live ? `<div class="row">${liveTag}<span class="tag${modelClass(a.model)}">${esc(a.model)}</span><span class="tag">${esc(a.effort)}</span></div>${a.ctx ? ctxMeterHtml(a.ctx) : ''}` : '';
+  const wid = live ? `<span class="wid">${esc(a.win)}</span>` : '';
+  const jump = jumpCommand(a);
+  const copy = `<button class="mini" data-copy="${esc(jump)}" title="${esc(jump)}">${live ? 'Copy jump' : 'Copy resume'}</button>`;
   const age = a.activity ? (a.activity === 'now' ? 'active now' : `active ${a.activity} ago`) : a.closedAgo ? `done ${a.closedAgo === 'now' ? 'just now' : a.closedAgo + ' ago'}` : 'tab closed';
-  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}"><h4>${esc(a.tab)}</h4>${meta}${body}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span><span class="btn">Details →</span></div></div>`;
+  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}"><h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span>${copy}</div></div>`;
 };
 
 const FILTERS_HTML = `<div class="filters"><button class="chip" data-range="today">Today</button><button class="chip" data-range="7">7 days</button><button class="chip" data-range="30">30 days</button><button class="chip" data-range="all">All</button><button class="chip" data-range="custom">Custom</button>
@@ -269,12 +303,12 @@ function openDrawer(id) {
   const ask = (a.status === 'review' || a.status === 'blocked') && a.summary ? '<div class="askbox ' + a.status + '">' + esc(a.summary) + '</div>' : '';
   drawer.innerHTML = \`
     <div class="dhead"><span class="pill"><span class="dot s-\${a.status}"></span>\${LABEL[a.status]}\${a.win !== '-' ? ' \\u00b7 ' + esc(a.win) + ' \\u00b7 ' + esc(a.pane) : ''}</span><button class="x" title="Close (Esc)">\\u2715</button></div>
-    <h2>\${esc(a.tab)}</h2>\${ask}
+    <h2>\${esc(a.tab)}</h2>\${a.goal ? '<div class="goal">' + esc(a.goal) + '</div>' : ''}\${ask}
     \${a.flags.map((f) => '<div class="askbox flag">\\u26a0 ' + esc(f) + '</div>').join('')}
     <div class="kv"><span>Task id</span><span>\${esc(a.id)}</span><span>Workdir</span><span>\${esc(a.where)}</span>
-      <span>Model</span><span>\${esc(a.model)}/\${esc(a.effort)}\${a.ctx ? ' \\u00b7 ctx ' + esc(a.ctx) + '% left' : ''}</span>
+      <span>Model</span><span>\${esc(a.model)}/\${esc(a.effort)}\${a.ctx ? ' \\u00b7 ctx ' + (100 - Number(a.ctx)) + '% used' : ''}</span>
       <span>Phase</span><span>\${esc(a.phase || '-')}</span><span>Since</span><span>\${esc(a.since)}</span>
-      <span>Last active</span><span>\${a.activity ? esc(a.activity) + ' ago' : a.closedAgo ? 'archived ' + esc(a.closedAgo) + ' ago, tab closed' : 'tab closed'}</span></div>
+      <span>Last active</span><span>\${a.activity ? (a.activity === 'now' ? 'now' : esc(a.activity) + ' ago') : a.closedAgo ? 'archived ' + esc(a.closedAgo) + ' ago, tab closed' : 'tab closed'}</span></div>
     <h5>Ledger notes</h5><div class="tl">\${a.notes.length ? a.notes.slice().reverse().map(([t, n]) => '<div><b>' + esc(t) + '</b>' + esc(n) + '</div>').join('') : '<div>no notes yet</div>'}</div>
     \${a.snapshot.length ? '<h5>Pane snapshot \\u00b7 ' + esc(GENERATED_AT) + '</h5><pre>' + a.snapshot.map(snapshotLine).join('\\n') + '</pre><div class="hint">Last lines of tmux capture-pane. A \\u276f line may be Claude\\'s grey suggestion, not text the worker typed.</div>' : ''}
     \${jump ? '<div class="cmd"><code>' + esc(jump) + '</code><button class="btn" data-copy="' + esc(jump) + '">Copy</button><a class="btn" href="' + esc(jumpHref) + '">' + (live ? 'Open in terminal' : 'Resume in terminal') + '</a></div>' : ''}\`;
@@ -326,7 +360,7 @@ document.addEventListener('click', (e) => {
   const chip = e.target.closest('[data-range]');
   if (chip) return setFilter({ ...filter, range: chip.dataset.range });
   const copy = e.target.closest('[data-copy]');
-  if (copy) { navigator.clipboard?.writeText(copy.dataset.copy).then(() => { copy.textContent = 'Copied'; setTimeout(() => (copy.textContent = 'Copy'), 1200); }); return; }
+  if (copy) { const label = copy.textContent; navigator.clipboard?.writeText(copy.dataset.copy).then(() => { copy.textContent = 'Copied'; setTimeout(() => (copy.textContent = label), 1200); }); return; }
   if (e.target.closest('.x') || e.target.classList.contains('scrim')) return closeDrawer();
   const card = e.target.closest('.card');
   if (card) openDrawer(card.dataset.id);
