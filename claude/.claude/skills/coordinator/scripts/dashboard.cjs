@@ -2,18 +2,13 @@
 // Usage: dashboard.cjs <state-dir> [out-file]   (out-file defaults to <state-dir>/status.html)
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
 const { faviconLink } = require('./favicon.cjs');
+const { tmux } = require('./dashboard-actions.cjs');
+const ui = require('./dashboard-actions-ui.cjs');
 
-const STATE_DIR = process.argv[2];
-if (!STATE_DIR) {
-  console.error('usage: dashboard.cjs <state-dir> [out-file]');
-  process.exit(1);
-}
-const OUT = process.argv[3] || path.join(STATE_DIR, 'status.html');
-const TASKS_DIR = path.join(STATE_DIR, 'tasks');
 const PAGE_RELOAD_SECONDS = 300;
 const STALE_ON_FOCUS_SECONDS = 60;
+const DEFAULT_PORT = 47317;
 // tmux replaces control characters such as \x1f with '_' in -F output, hence the printable '|' separator (name last).
 const ARCHIVE_WINDOW_DAYS = 30;
 const SNAPSHOT_LINES = 30;
@@ -27,13 +22,6 @@ const MODEL_FAMILIES = ['opus', 'sonnet', 'fable', 'haiku'];
 const SUFFIX_STATUS = { review: 'review', blocked: 'blocked', done: 'done' };
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const tmux = (args) => {
-  try {
-    return execFileSync('tmux', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch {
-    return '';
-  }
-};
 const readText = (file) => {
   try {
     return fs.readFileSync(file, 'utf8');
@@ -42,10 +30,10 @@ const readText = (file) => {
   }
 };
 
-const readTasks = () => {
-  if (!fs.existsSync(TASKS_DIR)) return [];
-  return fs.readdirSync(TASKS_DIR).flatMap((id) => {
-    const dir = path.join(TASKS_DIR, id);
+const readTasks = (tasksDir) => {
+  if (!fs.existsSync(tasksDir)) return [];
+  return fs.readdirSync(tasksDir).flatMap((id) => {
+    const dir = path.join(tasksDir, id);
     try {
       const meta = JSON.parse(readText(path.join(dir, 'meta.json')));
       return [{ meta, phase: readText(path.join(dir, 'phase')).trim(), notes: parseNotes(readText(path.join(dir, 'notes.md'))), goal: parseGoal(readText(path.join(dir, 'brief.md'))) }];
@@ -136,9 +124,9 @@ const buildItem = ({ meta, phase, notes, goal }, win) => {
 
 const isRecent = (iso) => Date.now() - Date.parse(iso) < ARCHIVE_WINDOW_DAYS * 86400 * 1000;
 
-const collectItems = () => {
+const collectItems = (stateDir) => {
   const windows = readWindows();
-  return readTasks()
+  return readTasks(path.join(stateDir, 'tasks'))
     .filter((t) => t.meta.id && (!t.meta.archivedAt || windows.has(t.meta.windowId) || isRecent(t.meta.archivedAt)))
     .map((t) => buildItem(t, windows.get(t.meta.windowId)))
     .sort((a, b) => b.updated - a.updated);
@@ -257,7 +245,7 @@ const trimNote = (note) => {
   return flat.length > NOTE_PREVIEW_CHARS ? `${flat.slice(0, NOTE_PREVIEW_CHARS - 1)}…` : flat;
 };
 
-const cardHtml = (a) => {
+const cardHtml = (a, served) => {
   const live = a.win !== '-';
   const cls = a.status === 'done' ? `done ${live ? 'open' : 'closed'}` : a.status === 'review' ? 'ask' : a.status;
   const goal = a.goal ? `<div class="goal">${esc(a.goal)}</div>` : '';
@@ -267,17 +255,19 @@ const cardHtml = (a) => {
   const wid = live ? `<span class="wid">${esc(a.win)}</span>` : '';
   const jump = jumpCommand(a);
   const copy = `<button class="mini" data-copy="${esc(jump)}" title="${esc(jump)}">${live ? 'Copy jump' : 'Copy resume'}</button>`;
+  const close = served && served.closable.has(a.id) ? ui.closeButtonHtml(a.id) : '';
   const age = a.activity ? (a.activity === 'now' ? 'active now' : `active ${a.activity} ago`) : a.closedAgo ? `done ${a.closedAgo === 'now' ? 'just now' : a.closedAgo + ' ago'}` : 'tab closed';
-  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}"><h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span>${copy}</div></div>`;
+  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}"><h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span><span class="acts">${close}${copy}</span></div></div>`;
 };
 
 const FILTERS_HTML = `<div class="filters"><button class="chip" data-range="today">Today</button><button class="chip" data-range="7">7 days</button><button class="chip" data-range="30">30 days</button><button class="chip" data-range="all">All</button><button class="chip" data-range="custom">Custom</button>
 <div class="custom" hidden><input type="date" data-from> <span>to</span> <input type="date" data-to></div></div><div class="empty" hidden>No sessions in this range.</div>`;
 
-const columnHtml = (items, [title, dotClass, status]) => {
+const columnHtml = (items, [title, dotClass, status], served) => {
   const list = items.filter((a) => a.status === status);
   const filters = status === 'done' ? FILTERS_HTML : '';
-  return `<div class="col" data-status="${status}"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count" data-total="${list.length}">${list.length}</span></div>${filters}${list.map(cardHtml).join('')}</div>`;
+  const closeAll = served && status === 'done' ? ui.closeAllButtonHtml(list.filter((a) => served.closable.has(a.id)).length) : '';
+  return `<div class="col" data-status="${status}"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count" data-total="${list.length}">${list.length}</span>${closeAll}</div>${filters}${list.map((a) => cardHtml(a, served)).join('')}</div>`;
 };
 
 const COLUMNS = [
@@ -355,7 +345,8 @@ document.addEventListener('change', (e) => {
     setFilter({ range: 'custom', from: custom.querySelector('[data-from]').value, to: custom.querySelector('[data-to]').value });
   }
 });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - GENERATED_MS > STALE_MS) location.reload(); });
+function reloadIfIdle() { if (!(window.dashboardBusy && window.dashboardBusy())) location.reload(); }
+document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - GENERATED_MS > STALE_MS) reloadIfIdle(); });
 document.addEventListener('click', (e) => {
   const refresh = e.target.closest('#refresh');
   if (refresh) { refresh.textContent = 'Refreshing…'; setTimeout(() => location.reload(), 1500); return; }
@@ -372,29 +363,53 @@ applyFilter();
 if (location.hash) openDrawer(decodeURIComponent(location.hash.slice(1)));
 `;
 
-const render = (items) => {
+const liveUrl = () => `http://127.0.0.1:${process.env.COORDINATOR_DASHBOARD_PORT || DEFAULT_PORT}/`;
+
+// options.served = { csrf, nonce, closable } for the page the local server sends; without it the
+// page is the read-only file:// copy.
+const render = (items, options = {}) => {
+  const { served } = options;
   const generatedAt = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  const nonce = served ? ` nonce="${served.nonce}"` : '';
+  const reloadSeconds = served ? ui.SERVED_RELOAD_SECONDS : PAGE_RELOAD_SECONDS;
+  const reloadNote = reloadSeconds >= 60 ? `${reloadSeconds / 60} min` : `${reloadSeconds}s`;
+  const metaRefresh = served ? '' : `<meta http-equiv="refresh" content="${PAGE_RELOAD_SECONDS}">`;
+  const refreshHref = served ? '/' : 'tmuxjump://refresh';
+  const actions = served ? ui.headerActionsHtml : ui.readOnlyHintHtml(liveUrl());
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="${PAGE_RELOAD_SECONDS}">
+${metaRefresh}
 <title>Agents</title>
 ${faviconLink(items)}
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
-<style>${css}</style>
-<script>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body>
-<div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right"><div class="meta">snapshot ${generatedAt} · reloads every ${PAGE_RELOAD_SECONDS / 60} min · click a card for details</div><a class="btn" id="refresh" href="tmuxjump://refresh">↻ Refresh</a></div></div>
-<div class="board">${COLUMNS.map((c) => columnHtml(items, c)).join('')}</div>
-<div class="scrim"></div><aside class="drawer"></aside>
-<script>${clientScript(items, generatedAt)}</script></body></html>`;
+<style>${css}${ui.actionsCss}</style>
+<script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body>
+<div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
+<div class="board">${COLUMNS.map((c) => columnHtml(items, c, served)).join('')}</div>
+<div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
+<script${nonce}>${clientScript(items, generatedAt)}${served ? ui.actionsClientScript(served.csrf) : ''}</script></body></html>`;
 };
 
-const tmpFile = `${OUT}.${process.pid}.tmp`;
-fs.mkdirSync(path.dirname(OUT), { recursive: true });
-try {
-  fs.writeFileSync(tmpFile, render(collectItems()));
-  fs.renameSync(tmpFile, OUT);
-} catch (err) {
-  fs.rmSync(tmpFile, { force: true });
-  throw err;
+const writePage = (stateDir, out, options) => {
+  const tmpFile = `${out}.${process.pid}.tmp`;
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  try {
+    fs.writeFileSync(tmpFile, render(collectItems(stateDir), options));
+    fs.renameSync(tmpFile, out);
+  } catch (err) {
+    fs.rmSync(tmpFile, { force: true });
+    throw err;
+  }
+};
+
+module.exports = { DEFAULT_PORT, collectItems, render, writePage };
+
+if (require.main === module) {
+  const [stateDir, out] = process.argv.slice(2);
+  if (!stateDir) {
+    console.error('usage: dashboard.cjs <state-dir> [out-file]');
+    process.exit(1);
+  }
+  writePage(stateDir, out || path.join(stateDir, 'status.html'));
 }

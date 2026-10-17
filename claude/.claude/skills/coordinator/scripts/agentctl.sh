@@ -40,6 +40,8 @@ Usage:
   agentctl.sh done <id> ["<summary>"]       archive the task (drops out of brief and ls)
   agentctl.sh brief                         standing instructions + active tasks with recent notes
   agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 5 min
+  agentctl.sh dashboard --serve             serve the page with actions on 127.0.0.1 (and keep the file fresh)
+  agentctl.sh dashboard --url               print the keyed URL that opens the served page
   agentctl.sh resume <id>                   new tmux session in the task's workdir running `claude --resume <id>`
   agentctl.sh install-jump-handler          register tmuxjump:// links (the page's "Open in terminal" button)
   agentctl.sh coordinator [--model <model>] [--effort <level>] [--name <session-name>]
@@ -358,10 +360,15 @@ cmd_done() {
 }
 
 cmd_dashboard() {
-  local generator
+  local generator server
   generator="$(dirname "$SCRIPT_PATH")/dashboard.cjs"
+  server="$(dirname "$SCRIPT_PATH")/dashboard-server.cjs"
   case "${1:-}" in
     "") node "$generator" "$STATE_DIR" "$DASHBOARD_FILE" ;;
+    --serve)
+      DASHBOARD_REFRESH_SECONDS="$DASHBOARD_REFRESH_SECONDS" exec node "$server" "$STATE_DIR" "$DASHBOARD_FILE"
+      ;;
+    --url) exec node "$server" --print-url ;;
     --watch)
       echo "[agentctl] regenerating file://$DASHBOARD_FILE every ${DASHBOARD_REFRESH_SECONDS}s (ctrl-c to stop)"
       while true; do
@@ -369,7 +376,7 @@ cmd_dashboard() {
         sleep "$DASHBOARD_REFRESH_SECONDS"
       done
       ;;
-    *) die "usage: dashboard [--watch]" ;;
+    *) die "usage: dashboard [--watch|--serve|--url]" ;;
   esac
   [[ -z ${1:-} ]] && echo "file://$DASHBOARD_FILE"
   return 0
@@ -463,6 +470,15 @@ coordinator_settings() {
                               hooks: [{type: "command", command: $hook}]}]}}'
 }
 
+# The served dashboard types into the pane carrying this option, so exactly one pane may hold it.
+mark_coordinator_pane() {
+  local pane role
+  while read -r pane role; do
+    if [[ $role == coordinator && $pane != "$1" ]]; then tmux set-option -p -u -t "$pane" @agentctl-role; fi
+  done < <(tmux list-panes -a -F '#{pane_id} #{@agentctl-role}')
+  tmux set-option -p -t "$1" @agentctl-role coordinator
+}
+
 cmd_coordinator() {
   local model="opus" effort="" name="coordinator" compact_window="$COORDINATOR_COMPACT_WINDOW"
   while (($#)); do
@@ -476,6 +492,7 @@ cmd_coordinator() {
   done
   if [[ -n ${TMUX_PANE:-} ]]; then
     name_window "$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}')" "$name"
+    mark_coordinator_pane "$TMUX_PANE"
   fi
   cd "$DEFAULT_REPO"
   local args=(-n "$name" --model "$model" --append-system-prompt "$COORDINATOR_ROLE"
