@@ -20,8 +20,8 @@ const SNAPSHOT_LINES = 30;
 const SNAPSHOT_LINE_WIDTH = 160;
 // Reloads restart CSS animations, so a head script derives the shimmer's phase from the clock to keep it continuous.
 const SHIMMER_MS = 2400;
-const CTX_HIGH_USED_PERCENT = 70;
-const CTX_CRITICAL_USED_PERCENT = 85;
+const CTX_HIGH_USED_PERCENT = 30;
+const CTX_CRITICAL_USED_PERCENT = 60;
 const NOTE_PREVIEW_CHARS = 220;
 const MODEL_FAMILIES = ['opus', 'sonnet', 'fable', 'haiku'];
 const SUFFIX_STATUS = { review: 'review', blocked: 'blocked', done: 'done' };
@@ -119,6 +119,7 @@ const buildItem = ({ meta, phase, notes, goal }, win) => {
     model: meta.model,
     effort: meta.effort || '-',
     ctx: ctx ? ctx[1] : '',
+    ctxMeter: ctx ? ctxMeterHtml(ctx[1]) : '',
     where: (meta.workdir || '').replace(process.env.HOME || '\0', '~'),
     since: (meta.createdAt || '').slice(0, 16).replace('T', ' '),
     phase,
@@ -202,6 +203,7 @@ h1,h2{font-family:var(--display);font-weight:600;color:var(--fg);line-height:1.0
 .meter{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin:-2px 0 12px}
 .meter .bar{flex:1;height:3px;border-radius:3px;background:var(--line);overflow:hidden}
 .meter .bar i{display:block;height:100%;border-radius:3px;background:var(--green-ink)}
+.kv .meter{margin:0;color:var(--muted)}
 .meter.high .bar i{background:var(--amber)}.meter.critical .bar i{background:var(--red)}
 .goal{font-size:13px;color:var(--fg);margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
 .line{font-size:12px;color:var(--muted);margin-bottom:12px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
@@ -261,7 +263,7 @@ const cardHtml = (a) => {
   const goal = a.goal ? `<div class="goal">${esc(a.goal)}</div>` : '';
   const note = a.summary ? `<div class="${a.status === 'review' || a.status === 'blocked' ? 'q' : 'line'}">${esc(trimNote(a.summary))}</div>` : '';
   const liveTag = a.status === 'done' ? '<span class="tag live">tab open</span>' : '';
-  const meta = live ? `<div class="row">${liveTag}<span class="tag${modelClass(a.model)}">${esc(a.model)}</span><span class="tag">${esc(a.effort)}</span></div>${a.ctx ? ctxMeterHtml(a.ctx) : ''}` : '';
+  const meta = live ? `<div class="row">${liveTag}<span class="tag${modelClass(a.model)}">${esc(a.model)}</span><span class="tag">${esc(a.effort)}</span></div>${a.ctxMeter}` : '';
   const wid = live ? `<span class="wid">${esc(a.win)}</span>` : '';
   const jump = jumpCommand(a);
   const copy = `<button class="mini" data-copy="${esc(jump)}" title="${esc(jump)}">${live ? 'Copy jump' : 'Copy resume'}</button>`;
@@ -306,7 +308,7 @@ function openDrawer(id) {
     <h2>\${esc(a.tab)}</h2>\${a.goal ? '<div class="goal">' + esc(a.goal) + '</div>' : ''}\${ask}
     \${a.flags.map((f) => '<div class="askbox flag">\\u26a0 ' + esc(f) + '</div>').join('')}
     <div class="kv"><span>Task id</span><span>\${esc(a.id)}</span><span>Workdir</span><span>\${esc(a.where)}</span>
-      <span>Model</span><span>\${esc(a.model)}/\${esc(a.effort)}\${a.ctx ? ' \\u00b7 ctx ' + (100 - Number(a.ctx)) + '% used' : ''}</span>
+      <span>Model</span><span>\${esc(a.model)}/\${esc(a.effort)}</span>\${a.ctxMeter ? '<span>Context</span><span>' + a.ctxMeter + '</span>' : ''}
       <span>Phase</span><span>\${esc(a.phase || '-')}</span><span>Since</span><span>\${esc(a.since)}</span>
       <span>Last active</span><span>\${a.activity ? (a.activity === 'now' ? 'now' : esc(a.activity) + ' ago') : a.closedAgo ? 'archived ' + esc(a.closedAgo) + ' ago, tab closed' : 'tab closed'}</span></div>
     <h5>Ledger notes</h5><div class="tl">\${a.notes.length ? a.notes.slice().reverse().map(([t, n]) => '<div><b>' + esc(t) + '</b>' + esc(n) + '</div>').join('') : '<div>no notes yet</div>'}</div>
