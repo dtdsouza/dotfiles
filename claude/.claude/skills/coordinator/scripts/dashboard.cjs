@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { faviconLink } = require('./favicon.cjs');
 
 const STATE_DIR = process.argv[2];
 if (!STATE_DIR) {
@@ -304,6 +305,7 @@ const render = (items) => {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="${PAGE_RELOAD_SECONDS}">
 <title>Agents</title>
+${faviconLink(items)}
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
 <style>${css}</style></head><body>
