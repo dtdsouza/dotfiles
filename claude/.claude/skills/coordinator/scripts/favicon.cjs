@@ -6,14 +6,15 @@ const moodOf = (items) => {
   return 'calm';
 };
 
-// Solid blue tile keeps the lime robot legible on both light and dark tab bars.
+// An opaque purple tile keeps the lime robot legible on both light and dark tab bars.
 // Alarm moods light the whole visor: eye-sized colour dots are indistinguishable at 16px.
 const robotSvg = (mood) => {
   const signal = MOOD_COLORS[mood];
   const visor = mood === 'calm' ? '#000516' : signal;
   const eyes = mood === 'calm' ? signal : '#000516';
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-<rect width="64" height="64" rx="14" fill="#0033eb"/>
+<defs><linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9b4dff"/><stop offset="1" stop-color="#4b1aa8"/></linearGradient></defs>
+<rect width="64" height="64" rx="14" fill="url(#tile)"/>
 <rect x="30.5" y="8" width="3" height="10" fill="#baf764"/>
 <circle cx="32" cy="8" r="5" fill="${signal}" stroke="#000516" stroke-width="2"/>
 <rect x="6" y="28" width="6" height="12" rx="2" fill="#baf764"/>
