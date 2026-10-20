@@ -6,29 +6,43 @@ const moodOf = (items) => {
   return 'calm';
 };
 
-// An opaque purple tile keeps the lime robot legible on both light and dark tab bars.
-// Alarm moods light the whole visor: eye-sized colour dots are indistinguishable at 16px.
-const robotSvg = (mood) => {
-  const signal = MOOD_COLORS[mood];
-  const visor = mood === 'calm' ? '#000516' : signal;
-  const eyes = mood === 'calm' ? signal : '#000516';
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-<defs><linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9b4dff"/><stop offset="1" stop-color="#4b1aa8"/></linearGradient></defs>
-<rect width="64" height="64" rx="14" fill="url(#tile)"/>
-<rect x="30.5" y="8" width="3" height="10" fill="#baf764"/>
-<circle cx="32" cy="8" r="5" fill="${signal}" stroke="#000516" stroke-width="2"/>
-<rect x="6" y="28" width="6" height="12" rx="2" fill="#baf764"/>
-<rect x="52" y="28" width="6" height="12" rx="2" fill="#baf764"/>
-<rect x="11" y="17" width="42" height="32" rx="9" fill="#baf764"/>
-<rect x="17" y="24" width="30" height="15" rx="7.5" fill="${visor}" stroke="#000516" stroke-width="2"/>
-<circle cx="25" cy="31.5" r="4.2" fill="${eyes}"/>
-<circle cx="39" cy="31.5" r="4.2" fill="${eyes}"/>
-<rect x="26" y="43" width="12" height="2.5" rx="1.25" fill="#000516"/>
-<rect x="17" y="53" width="30" height="11" rx="4" fill="#baf764"/>
-</svg>`;
+// The card agent seen from behind at its CRT, redrawn on 16x16 because the 32x24 sprite turns to mush at tab size.
+// The mood lights the whole screen: eye-sized colour dots are indistinguishable at 16px.
+const ICON_GRID = [
+  '.BBBBBBBBBBBBBB.',
+  'BkkkkkkkkkkkkkkB',
+  'BkmmmmmmmmmmmMkB',
+  'BkmggggggggggMkB',
+  'BkmgccgccccggMkB',
+  'BkmggggggggggMkB',
+  'BkmgcccgccgggMkB',
+  'BkmggggggggggMkB',
+  'BkmggggggggggMkB',
+  'BkmmmkkkkkkmmMkB',
+  'BkkkkhhhhhhkkkkB',
+  'BBBkhhhhhhhhkBBB',
+  'BBBkhhhhhhhhkBBB',
+  'BBBkshhhhhhskBBB',
+  'BBkkttttttttkkBB',
+  '.BkttttttttttkB.',
+];
+
+// Hex values from the dark theme of dashboard-sprites.cjs: a data-URI icon cannot read the page's CSS variables.
+// The opaque tile keeps the icon legible on both light and dark tab bars.
+const ICON_FILLS = {
+  B: '#151b2c', k: '#232c48', m: '#7d869e', M: '#596179', c: '#0b1612', h: '#7d4fb0', s: '#f6d2b1', t: '#4a74ff',
+};
+
+const runsOf = (ch) =>
+  ICON_GRID.flatMap((row, y) => [...row.matchAll(new RegExp(`${ch}+`, 'g'))].map((m) => `M${m.index} ${y}h${m[0].length}v1h-${m[0].length}z`)).join('');
+
+const agentIconSvg = (mood) => {
+  const fills = { ...ICON_FILLS, g: MOOD_COLORS[mood] };
+  const paths = Object.entries(fills).map(([ch, fill]) => `<path fill="${fill}" d="${runsOf(ch)}"/>`).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">${paths}</svg>`;
 };
 
 const faviconLink = (items) =>
-  `<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,${encodeURIComponent(robotSvg(moodOf(items)))}">`;
+  `<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,${encodeURIComponent(agentIconSvg(moodOf(items)))}">`;
 
-module.exports = { faviconLink, robotSvg, MOOD_COLORS };
+module.exports = { faviconLink, agentIconSvg, moodOf, ICON_GRID, MOOD_COLORS };

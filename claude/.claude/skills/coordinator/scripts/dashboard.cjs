@@ -5,6 +5,7 @@ const path = require('path');
 const { faviconLink } = require('./favicon.cjs');
 const { tmux } = require('./dashboard-actions.cjs');
 const ui = require('./dashboard-actions-ui.cjs');
+const { spriteKind, spriteHtml, spriteDefsHtml, spriteCss } = require('./dashboard-sprites.cjs');
 
 const PAGE_RELOAD_SECONDS = 300;
 const STALE_ON_FOCUS_SECONDS = 60;
@@ -257,7 +258,8 @@ const cardHtml = (a, served) => {
   const copy = `<button class="mini" data-copy="${esc(jump)}" title="${esc(jump)}">${live ? 'Copy jump' : 'Copy resume'}</button>`;
   const close = served && served.closable.has(a.id) ? ui.closeButtonHtml(a.id) : '';
   const age = a.activity ? (a.activity === 'now' ? 'active now' : `active ${a.activity} ago`) : a.closedAgo ? `done ${a.closedAgo === 'now' ? 'just now' : a.closedAgo + ' ago'}` : 'tab closed';
-  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}"><h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span><span class="acts">${close}${copy}</span></div></div>`;
+  const sprite = spriteHtml(spriteKind({ status: a.status, live }), a.id);
+  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}">${sprite}<h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span><span class="acts">${close}${copy}</span></div></div>`;
 };
 
 const FILTERS_HTML = `<div class="filters"><button class="chip" data-range="today">Today</button><button class="chip" data-range="7">7 days</button><button class="chip" data-range="30">30 days</button><button class="chip" data-range="all">All</button><button class="chip" data-range="custom">Custom</button>
@@ -383,9 +385,10 @@ ${metaRefresh}
 ${faviconLink(items)}
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
-<style>${css}${ui.actionsCss}</style>
+<style>${css}${ui.actionsCss}${spriteCss}</style>
 <script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body>
 <div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
+${spriteDefsHtml(items.map((a) => spriteKind({ status: a.status, live: a.win !== '-' })))}
 <div class="board">${COLUMNS.map((c) => columnHtml(items, c, served)).join('')}</div>
 <div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
 <script${nonce}>${clientScript(items, generatedAt)}${served ? ui.actionsClientScript(served.csrf) : ''}</script></body></html>`;
