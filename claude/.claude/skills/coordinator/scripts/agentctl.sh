@@ -41,7 +41,7 @@ Usage:
   agentctl.sh brief                         standing instructions + active tasks with recent notes
   agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 5 min
   agentctl.sh dashboard --serve             serve the page with actions on 127.0.0.1 (and keep the file fresh)
-  agentctl.sh dashboard --url               print the keyed URL that opens the served page
+  agentctl.sh dashboard --url [--tailnet]   print the keyed URL that opens the served page (--tailnet: the phone's https URL)
   agentctl.sh resume <id>                   new tmux session in the task's workdir running `claude --resume <id>`
   agentctl.sh install-jump-handler          register tmuxjump:// links (the page's "Open in terminal" button)
   agentctl.sh coordinator [--model <model>] [--effort <level>] [--name <session-name>]
@@ -368,7 +368,7 @@ cmd_dashboard() {
     --serve)
       DASHBOARD_REFRESH_SECONDS="$DASHBOARD_REFRESH_SECONDS" exec node "$server" "$STATE_DIR" "$DASHBOARD_FILE"
       ;;
-    --url) exec node "$server" --print-url ;;
+    --url) exec node "$server" --print-url "${2:-}" ;;
     --watch)
       echo "[agentctl] regenerating file://$DASHBOARD_FILE every ${DASHBOARD_REFRESH_SECONDS}s (ctrl-c to stop)"
       while true; do
@@ -376,7 +376,7 @@ cmd_dashboard() {
         sleep "$DASHBOARD_REFRESH_SECONDS"
       done
       ;;
-    *) die "usage: dashboard [--watch|--serve|--url]" ;;
+    *) die "usage: dashboard [--watch|--serve|--url [--tailnet]]" ;;
   esac
   [[ -z ${1:-} ]] && echo "file://$DASHBOARD_FILE"
   return 0

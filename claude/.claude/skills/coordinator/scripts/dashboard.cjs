@@ -255,11 +255,14 @@ const cardHtml = (a, served) => {
   const meta = live ? `<div class="row">${liveTag}<span class="tag${modelClass(a.model)}">${esc(a.model)}</span><span class="tag">${esc(a.effort)}</span></div>${a.ctxMeter}` : '';
   const wid = live ? `<span class="wid">${esc(a.win)}</span>` : '';
   const jump = jumpCommand(a);
-  const copy = `<button class="mini" data-copy="${esc(jump)}" title="${esc(jump)}">${live ? 'Copy jump' : 'Copy resume'}</button>`;
+  const copy = `<button class="mini desktop-only" data-copy="${esc(jump)}" title="${esc(jump)}">${live ? 'Copy jump' : 'Copy resume'}</button>`;
   const close = served && served.closable.has(a.id) ? ui.closeButtonHtml(a.id) : '';
+  const replyable = Boolean(served && served.replyable.has(a.id));
+  const reply = replyable ? ui.replyFormHtml(a.id) : '';
+  const peek = replyable ? ui.peekButtonHtml(a.id) : '';
   const age = a.activity ? (a.activity === 'now' ? 'active now' : `active ${a.activity} ago`) : a.closedAgo ? `done ${a.closedAgo === 'now' ? 'just now' : a.closedAgo + ' ago'}` : 'tab closed';
   const sprite = spriteHtml(spriteKind({ status: a.status, live }), a.id);
-  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}">${sprite}<h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}<div class="foot"><span class="age">${age}</span><span class="acts">${close}${copy}</span></div></div>`;
+  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}">${sprite}<h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}${reply}<div class="foot"><span class="age">${age}</span><span class="acts">${peek}${close}${copy}</span></div></div>`;
 };
 
 const FILTERS_HTML = `<div class="filters"><button class="chip" data-range="today">Today</button><button class="chip" data-range="7">7 days</button><button class="chip" data-range="30">30 days</button><button class="chip" data-range="all">All</button><button class="chip" data-range="custom">Custom</button>
@@ -295,21 +298,24 @@ function openDrawer(id) {
   const jump = live ? 'tmux select-window -t ' + a.session + ':' + a.win : 'cd ' + a.where + ' && claude --resume ' + a.id;
   const jumpHref = live ? 'tmuxjump://' + encodeURIComponent(a.session) + '/' + a.win : 'tmuxjump://resume/' + encodeURIComponent(a.id);
   const ask = (a.status === 'review' || a.status === 'blocked') && a.summary ? '<div class="askbox ' + a.status + '">' + esc(a.summary) + '</div>' : '';
+  const livePane = window.dashboardDrawer ? window.dashboardDrawer(a) : '';
   drawer.innerHTML = \`
     <div class="dhead"><span class="pill"><span class="dot s-\${a.status}"></span>\${LABEL[a.status]}\${a.win !== '-' ? ' \\u00b7 ' + esc(a.win) + ' \\u00b7 ' + esc(a.pane) : ''}</span><button class="x" title="Close (Esc)">\\u2715</button></div>
     <h2>\${esc(a.tab)}</h2>\${a.goal ? '<div class="goal">' + esc(a.goal) + '</div>' : ''}\${ask}
-    \${a.flags.map((f) => '<div class="askbox flag">\\u26a0 ' + esc(f) + '</div>').join('')}
+    \${a.flags.map((f) => '<div class="askbox flag">\\u26a0 ' + esc(f) + '</div>').join('')}\${livePane}
     <div class="kv"><span>Task id</span><span>\${esc(a.id)}</span><span>Workdir</span><span>\${esc(a.where)}</span>
       <span>Model</span><span>\${esc(a.model)}/\${esc(a.effort)}</span>\${a.ctxMeter ? '<span>Context</span><span>' + a.ctxMeter + '</span>' : ''}
       <span>Phase</span><span>\${esc(a.phase || '-')}</span><span>Since</span><span>\${esc(a.since)}</span>
       <span>Last active</span><span>\${a.activity ? (a.activity === 'now' ? 'now' : esc(a.activity) + ' ago') : a.closedAgo ? 'archived ' + esc(a.closedAgo) + ' ago, tab closed' : 'tab closed'}</span></div>
     <h5>Ledger notes</h5><div class="tl">\${a.notes.length ? a.notes.slice().reverse().map(([t, n]) => '<div><b>' + esc(t) + '</b>' + esc(n) + '</div>').join('') : '<div>no notes yet</div>'}</div>
-    \${a.snapshot.length ? '<h5>Pane snapshot \\u00b7 ' + esc(GENERATED_AT) + '</h5><pre>' + a.snapshot.map(snapshotLine).join('\\n') + '</pre><div class="hint">Last lines of tmux capture-pane. A \\u276f line may be Claude\\'s grey suggestion, not text the worker typed.</div>' : ''}
-    \${jump ? '<div class="cmd"><code>' + esc(jump) + '</code><button class="btn" data-copy="' + esc(jump) + '">Copy</button><a class="btn" href="' + esc(jumpHref) + '">' + (live ? 'Open in terminal' : 'Resume in terminal') + '</a></div>' : ''}\`;
+    \${a.snapshot.length && !livePane ? '<h5>Pane snapshot \\u00b7 ' + esc(GENERATED_AT) + '</h5><pre>' + a.snapshot.map(snapshotLine).join('\\n') + '</pre><div class="hint">Last lines of tmux capture-pane. A \\u276f line may be Claude\\'s grey suggestion, not text the worker typed.</div>' : ''}
+    \${jump ? '<div class="cmd desktop-only"><code>' + esc(jump) + '</code><button class="btn" data-copy="' + esc(jump) + '">Copy</button><a class="btn" href="' + esc(jumpHref) + '">' + (live ? 'Open in terminal' : 'Resume in terminal') + '</a></div>' : ''}\`;
   document.body.classList.add('open');
   history.replaceState(null, '', '#' + encodeURIComponent(id));
+  if (window.dashboardDrawerOpened) window.dashboardDrawerOpened(a);
 }
 function closeDrawer() {
+  if (window.dashboardDrawerClosed) window.dashboardDrawerClosed();
   document.body.classList.remove('open');
   document.querySelectorAll('.card.sel').forEach((c) => c.classList.remove('sel'));
   history.replaceState(null, '', location.pathname);
@@ -367,8 +373,8 @@ if (location.hash) openDrawer(decodeURIComponent(location.hash.slice(1)));
 
 const liveUrl = () => `http://127.0.0.1:${process.env.COORDINATOR_DASHBOARD_PORT || DEFAULT_PORT}/`;
 
-// options.served = { csrf, nonce, closable } for the page the local server sends; without it the
-// page is the read-only file:// copy.
+// options.served = { csrf, nonce, closable, replyable, remote } for the page the local server sends;
+// without it the page is the read-only file:// copy. remote marks a page served through the tailnet.
 const render = (items, options = {}) => {
   const { served } = options;
   const generatedAt = new Date().toLocaleTimeString('en-GB', { hour12: false });
@@ -386,12 +392,12 @@ ${faviconLink(items)}
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
 <style>${css}${ui.actionsCss}${spriteCss}</style>
-<script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body>
+<script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body${served && served.remote ? ' class="remote"' : ''}>
 <div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
 ${spriteDefsHtml(items.map((a) => spriteKind({ status: a.status, live: a.win !== '-' })))}
 <div class="board">${COLUMNS.map((c) => columnHtml(items, c, served)).join('')}</div>
 <div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
-<script${nonce}>${clientScript(items, generatedAt)}${served ? ui.actionsClientScript(served.csrf) : ''}</script></body></html>`;
+<script${nonce}>${clientScript(items, generatedAt)}${served ? ui.actionsClientScript(served.csrf, served.replyable) : ''}</script></body></html>`;
 };
 
 const writePage = (stateDir, out, options) => {
