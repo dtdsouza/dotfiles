@@ -263,6 +263,11 @@ describe('helpers', () => {
     assert.throws(() => actions.resolveCoordinator([pane('1', 'x')]), /No coordinator pane/);
   });
 
+  test('resolveCoordinator counts a pane once when a grouped session lists it again', () => {
+    const inSession = (session) => ({ id: '%21', windowId: '@11', session, command: 'claude', role: '', windowName: 'coordinator' });
+    assert.equal(actions.resolveCoordinator([inSession('phone'), inSession('twism')]).id, '%21');
+  });
+
   test('sanitizeMessage rejects empty and non-text input', () => {
     assert.throws(() => actions.sanitizeMessage('\u0007\n '), /empty/);
     assert.throws(() => actions.sanitizeMessage(42), /must be text/);

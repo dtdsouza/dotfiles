@@ -39,9 +39,11 @@ const capturePane = (paneId) => tmux(['capture-pane', '-p', '-t', paneId]).split
 
 // The role option is set by `agentctl.sh coordinator`; the window name covers a coordinator that was
 // restarted by hand (`claude --resume` carries no `-n coordinator` on its command line).
+// `list-panes -a` repeats a pane once per session of a group (`tmux new -t twism`), so count pane ids.
 const resolveCoordinator = (panes) => {
   const byRole = panes.filter((p) => p.role === COORDINATOR_ROLE);
-  const candidates = byRole.length ? byRole : panes.filter((p) => p.windowName === 'coordinator');
+  const matches = byRole.length ? byRole : panes.filter((p) => p.windowName === 'coordinator');
+  const candidates = matches.filter((p, index) => matches.findIndex((other) => other.id === p.id) === index);
   if (!candidates.length) throw new ActionError('No coordinator pane found: start it with `agentctl.sh coordinator`.');
   if (candidates.length > 1) {
     throw new ActionError(`Found ${candidates.length} coordinator panes (${candidates.map((p) => p.id).join(', ')}); close the extra ones first.`);
