@@ -15,7 +15,7 @@ set -euo pipefail
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DOTFILES_DIR"
 
-PACKAGES=(zsh tmux nvim git lazygit bash gh hermes claude)
+PACKAGES=(zsh tmux nvim git lazygit bash gh claude)
 
 echo "==> dotfiles: $DOTFILES_DIR"
 

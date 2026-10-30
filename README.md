@@ -15,11 +15,7 @@ Each top-level directory is a Stow "package" whose contents mirror `$HOME`; runn
 | `bash`    | `~/.bashrc`, `~/.profile`                            |
 | `lazygit` | `~/.config/lazygit/config.yml`                       |
 | `gh`      | `~/.config/gh/config.yml`                            |
-| `hermes`  | `~/.local/bin/hermes-attention-notify`               |
 | `claude`  | `~/.claude/skills/coordinator/` (tmux agent coordinator), `~/.claude/skills/slack-send-as-app/` (Slack sends as the app) |
-
-The `hermes` helper plays its audio cue through Linux ALSA (`aplay`); when audio is
-unavailable, it still uses tmux's visual bell for the originating pane.
 
 ## Install (new machine)
 
