@@ -1,0 +1,139 @@
+// The served dashboard's file features: the Files page, each task's files in its drawer, and the
+// artifact paths in ledger notes turned into viewer links.
+const os = require('os');
+const path = require('path');
+const { readLedger } = require('./dashboard-actions.cjs');
+const { findNoteRefs, resolveCandidate, collectMentions, createAttribution } = require('./dashboard-files-index.cjs');
+const { viewHref } = require('./dashboard-files-serve.cjs');
+
+const FILES_PAGE_LIMIT = 300;
+const DRAWER_FILES_LIMIT = 20;
+const STALE_LINKS_MS = 10 * 60 * 1000;
+const KIND_LABELS = { html: 'HTML', video: 'Video', pdf: 'PDF', image: 'Image', svg: 'Image', text: 'Text' };
+
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+const ago = (ms) => {
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return 'now';
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+};
+
+const shortDir = (file, home = os.homedir()) => path.dirname(file).replace(home, '~');
+
+const fileRow = (signer, viewable) => ({
+  name: path.basename(viewable.real),
+  dir: shortDir(viewable.real),
+  kind: viewable.kind,
+  href: viewHref(signer, viewable),
+  age: ago(viewable.mtimeMs),
+  mtimeMs: viewable.mtimeMs,
+});
+
+const linkHtml = (row, label) => `<a class="flink" href="${esc(row.href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+
+// Everything outside a recognized, viewable path stays escaped text; a brace list keeps its text
+// and gets one link per file it names.
+const linkifyText = (text, { bases, policy, signer }) => {
+  let html = '';
+  let at = 0;
+  for (const ref of findNoteRefs(text)) {
+    const files = ref.candidates.map((c) => resolveCandidate(c, bases, policy)).filter(Boolean);
+    if (!files.length) continue;
+    html += esc(text.slice(at, ref.start));
+    html +=
+      files.length === 1 && ref.candidates.length === 1
+        ? linkHtml(fileRow(signer, files[0]), ref.raw)
+        : `${esc(ref.raw)} ${files.map((f) => linkHtml(fileRow(signer, f), path.extname(f.real).slice(1) || path.basename(f.real))).join(' ')}`;
+    at = ref.end;
+  }
+  return html + esc(text.slice(at));
+};
+
+// Adds `files` (newest first) and HTML notes to each served item; the file:// copy never gets them.
+const decorateItems = (items, { stateDir, policy, index, signer }) => {
+  const metas = readLedger(stateDir).filter((m) => m.id);
+  const byId = new Map(metas.map((m) => [m.id, m]));
+  const { byTask, owner } = collectMentions(stateDir, metas, policy);
+  const attribute = createAttribution(metas, owner);
+  const indexed = new Map();
+  index.list().forEach((f) => {
+    const id = attribute(f);
+    if (id) indexed.set(id, [...(indexed.get(id) || []), f]);
+  });
+  return items.map((item) => {
+    const meta = byId.get(item.id) || {};
+    const context = { bases: [meta.workdir, meta.repo], policy, signer };
+    const unique = new Map([...(byTask.get(item.id) || []), ...(indexed.get(item.id) || [])].map((f) => [f.real, f]));
+    const files = [...unique.values()].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, DRAWER_FILES_LIMIT).map((f) => fileRow(signer, f));
+    return {
+      ...item,
+      files,
+      notes: item.notes.map(([at, text]) => [at, linkifyText(text, context)]),
+      notesHtml: true,
+      summaryHtml: item.summary ? linkifyText(item.summary, context) : '',
+    };
+  });
+};
+
+const filesCss = `.fbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:16px 40px 0}
+.fbar input{flex:1 1 220px;min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:999px;color:var(--fg);padding:8px 14px;font:14px var(--body)}
+.flist{padding:12px 40px 40px;display:grid;gap:10px}
+.frow{border:1.5px solid var(--line);border-radius:18px;padding:12px 14px;display:grid;gap:4px;background:linear-gradient(230deg,transparent 60%,var(--card-sheen))}
+.frow .top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.flink{color:var(--green-ink);text-decoration:none;font-weight:600;word-break:break-all}.flink:hover{text-decoration:underline}
+.frow .where{font:11px/1.4 var(--mono);color:var(--muted);word-break:break-all}
+.frow .age{margin-left:auto;font-size:12px;color:var(--muted)}
+.tasklink{color:var(--text);text-decoration:none}.tasklink:hover{color:var(--fg)}
+.files{display:grid;gap:8px}.files .frow{padding:10px 12px}
+.tl .flink,.askbox .flink{font-weight:500}
+@media (max-width:640px){.fbar{padding:12px 16px 0}.flist{padding:12px 16px 32px}.flink{display:inline-block;padding:4px 0}}`;
+
+const kindTag = (kind) => `<span class="tag">${esc(KIND_LABELS[kind] || kind)}</span>`;
+
+const filesPageRow = (row, taskId) =>
+  `<div class="frow" data-kind="${esc(row.kind)}" data-text="${esc(`${row.name} ${row.dir} ${taskId}`.toLowerCase())}"><div class="top">${kindTag(row.kind)}${linkHtml(row, row.name)}<span class="age">${esc(row.age)}</span></div>${
+    taskId ? `<a class="tasklink pill" href="/#${esc(encodeURIComponent(taskId))}">${esc(taskId)}</a>` : ''
+  }<div class="where">${esc(row.dir)}</div></div>`;
+
+const filesPageScript = `
+const chips = [...document.querySelectorAll('[data-kind-filter]')];
+const search = document.querySelector('.fbar input');
+const rows = [...document.querySelectorAll('.frow')];
+let kind = 'all';
+function apply() {
+  const q = search.value.trim().toLowerCase();
+  let shown = 0;
+  rows.forEach((r) => { r.hidden = !((kind === 'all' || r.dataset.kind === kind) && (!q || r.dataset.text.includes(q))); if (!r.hidden) shown += 1; });
+  chips.forEach((c) => c.classList.toggle('on', c.dataset.kindFilter === kind));
+  document.querySelector('.empty').hidden = shown > 0;
+}
+chips.forEach((c) => c.addEventListener('click', () => { kind = c.dataset.kindFilter; apply(); }));
+search.addEventListener('input', apply);
+const LOADED = Date.now();
+document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - LOADED > ${STALE_LINKS_MS} && !search.value) location.reload(); });
+apply();
+`;
+
+// baseCss is the dashboard's own stylesheet, so the page shares its palette and light mode.
+const filesPageHtml = ({ stateDir, policy, index, signer, nonce, baseCss, remote }) => {
+  const metas = readLedger(stateDir).filter((m) => m.id);
+  const attribute = createAttribution(metas, collectMentions(stateDir, metas, policy).owner);
+  const files = index.list().slice(0, FILES_PAGE_LIMIT);
+  const chips = [['all', 'All'], ['html', 'Reports'], ['video', 'Videos'], ['pdf', 'PDFs']]
+    .map(([value, label]) => `<button class="chip" type="button" data-kind-filter="${value}">${label}</button>`)
+    .join('');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Files · Agents</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
+<style>${baseCss}${filesCss}</style></head><body${remote ? ' class="remote"' : ''}>
+<div class="topbar"><div class="brand"><h1>Files</h1><span class="pill">${files.length} newest reports, videos and PDFs</span></div><div class="right"><a class="btn" href="/">← Agents</a></div></div>
+<div class="fbar">${chips}<input type="search" placeholder="Filter by name, folder or task" aria-label="Filter files"></div>
+<div class="flist">${files.map((f) => filesPageRow(fileRow(signer, f), attribute(f))).join('')}<div class="empty" hidden>No files match.</div></div>
+<script nonce="${nonce}">${filesPageScript}</script></body></html>`;
+};
+
+module.exports = { filesCss, decorateItems, filesPageHtml };

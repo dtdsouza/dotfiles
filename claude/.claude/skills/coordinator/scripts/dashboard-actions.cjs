@@ -230,6 +230,7 @@ module.exports = {
   ROLE_OPTION,
   tmux,
   listPanes,
+  readLedger,
   resolveCoordinator,
   sanitizeMessage,
   promptIsReady,

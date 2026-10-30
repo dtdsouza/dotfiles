@@ -6,9 +6,13 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { DEFAULT_PORT, collectItems, render, writePage } = require('./dashboard.cjs');
+const { DEFAULT_PORT, css, collectItems, render, writePage } = require('./dashboard.cjs');
 const actions = require('./dashboard-actions.cjs');
 const { classifyRequest, loadTailnetConfig } = require('./dashboard-tailnet.cjs');
+const { loadFilePolicy } = require('./dashboard-files-policy.cjs');
+const { createArtifactIndex } = require('./dashboard-files-index.cjs');
+const { VIEW_PREFIX, createSigner, handleView } = require('./dashboard-files-serve.cjs');
+const { decorateItems, filesPageHtml } = require('./dashboard-files-ui.cjs');
 
 const HOST = '127.0.0.1';
 const COOKIE = 'agentctl_dashboard';
@@ -179,7 +183,9 @@ const handleAction = async (req, res, context) => {
 
 // Browsers send no Origin on a same-origin GET, so a read leans on Sec-Fetch-Site and the custom
 // token header (which no cross-site page can set without a preflight this server never answers).
-const refuseRead = (req, { key, csrf }) => {
+// An Origin that is present must still be ours: a sandboxed report's fetch sends `Origin: null`.
+const refuseRead = (req, { origins, key, csrf }) => {
+  if (req.headers.origin !== undefined && !origins.has(req.headers.origin)) return [403, 'Cross-origin request refused.'];
   const site = req.headers['sec-fetch-site'];
   if (site && site !== 'same-origin') return [403, 'Cross-site request refused.'];
   if (!safeEqual(readCookie(req.headers.cookie, COOKIE), key)) return [401, 'Missing or wrong key cookie.'];
@@ -202,7 +208,22 @@ const handlePeek = async (req, res, context, readPane) => {
 
 const keyCookie = (key, secure) => `${COOKIE}=${key}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_SECONDS}${secure ? '; Secure' : ''}`;
 
+// Opening the list mints view links, so it takes the cookie and refuses a navigation that another
+// site (or a sandboxed report, which counts as one) started.
+const handleFilesPage = (req, res, context) => {
+  const { files } = context;
+  if (!files) return send(res, 404, 'Not found');
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return send(res, 403, 'Cross-site request refused.');
+  if (!safeEqual(readCookie(req.headers.cookie, COOKIE), context.key)) return send(res, 401, LOCKED_PAGE);
+  if (!context.allowPeek()) return send(res, 429, 'Too many refreshes; wait a minute.');
+  const nonce = crypto.randomBytes(16).toString('base64');
+  const html = filesPageHtml({ stateDir: context.stateDir, ...files, nonce, baseCss: css, remote: context.via === 'tailnet' });
+  return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
+};
+
 const handlePage = (req, res, context) => {
+  if (context.url.pathname === '/files') return handleFilesPage(req, res, context);
   if (context.url.pathname === '/api/peek') {
     return handlePeek(req, res, context, () => actions.peekTask(context.stateDir, context.url.searchParams.get('id')));
   }
@@ -221,13 +242,18 @@ const handlePage = (req, res, context) => {
     closable: actions.closableTaskIds(context.stateDir, panes),
     replyable: actions.replyableTaskIds(context.stateDir, panes),
     remote: context.via === 'tailnet',
+    files: Boolean(context.files),
   };
-  const html = render(collectItems(context.stateDir), { served });
+  const items = collectItems(context.stateDir);
+  const html = render(context.files ? decorateItems(items, { stateDir: context.stateDir, ...context.files }) : items, { served });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
 };
 
+// files = { policy, signer, index } turns on the file viewer; null leaves it off.
+const createFileViewer = (policy) => (policy ? { policy, signer: createSigner(), index: createArtifactIndex(policy) } : null);
+
 // tailnet = { host, logins } admits requests proxied by `tailscale serve`; null keeps it local-only.
-const createDashboardServer = ({ stateDir, key, tailnet = null, auditFile = defaultAuditFile() }) => {
+const createDashboardServer = ({ stateDir, key, tailnet = null, auditFile = defaultAuditFile(), files = null }) => {
   const csrf = crypto.randomBytes(32).toString('base64url');
   const allowAction = createRateLimiter(RATE_MAX_ACTIONS);
   const allowPeek = createRateLimiter(RATE_MAX_PEEKS);
@@ -243,8 +269,13 @@ const createDashboardServer = ({ stateDir, key, tailnet = null, auditFile = defa
       allowAction,
       allowPeek,
       auditFile,
+      files,
       url: new URL(req.url, `http://${HOST}:${port}`),
     };
+    if (files && context.url.pathname.startsWith(VIEW_PREFIX) && (req.method === 'GET' || req.method === 'HEAD')) {
+      const self = arrival.via === 'tailnet' ? `https://${tailnet.host}` : `http://${String(req.headers.host).toLowerCase()}`;
+      return handleView(req, res, { url: context.url, policy: files.policy, signer: files.signer, self });
+    }
     const handler = req.method === 'GET' ? handlePage : req.method === 'POST' ? handleAction : null;
     if (!handler) return send(res, 405, { ok: false, error: 'Method not allowed.' }, { Allow: 'GET, POST' });
     Promise.resolve(handler(req, res, context)).catch((err) => {
@@ -279,7 +310,8 @@ const main = () => {
   const refreshSeconds = Number(process.env.DASHBOARD_REFRESH_SECONDS || 300);
   const key = loadOrCreateKey();
   const tailnet = loadTailnetConfig();
-  const server = createDashboardServer({ stateDir, key, tailnet });
+  const policy = loadFilePolicy();
+  const server = createDashboardServer({ stateDir, key, tailnet, files: createFileViewer(policy) });
   const regenerate = () => {
     try {
       writePage(stateDir, out);
@@ -300,10 +332,15 @@ const main = () => {
         ? `[dashboard] also accepting https://${tailnet.host}/ through \`tailscale serve\` for ${tailnet.logins.join(', ')}`
         : '[dashboard] tailnet access off (no Tailscale name found, or COORDINATOR_DASHBOARD_TAILNET=off)',
     );
+    console.log(
+      policy
+        ? `[dashboard] file viewer on for ${policy.roots.map((r) => r.pattern).join(', ')}`
+        : '[dashboard] file viewer off (COORDINATOR_DASHBOARD_FILE_ROOTS=off or no usable root)',
+    );
     console.log(`[dashboard] also regenerating file://${out} every ${refreshSeconds}s; ctrl-c to stop`);
   });
 };
 
-module.exports = { COOKIE, MAX_BODY_BYTES, createDashboardServer, loadOrCreateKey, urlWithKey };
+module.exports = { COOKIE, MAX_BODY_BYTES, createDashboardServer, createFileViewer, loadOrCreateKey, urlWithKey };
 
 if (require.main === module) main();

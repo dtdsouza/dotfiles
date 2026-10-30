@@ -5,6 +5,7 @@ const path = require('path');
 const { faviconLink } = require('./favicon.cjs');
 const { tmux } = require('./dashboard-actions.cjs');
 const ui = require('./dashboard-actions-ui.cjs');
+const { filesCss } = require('./dashboard-files-ui.cjs');
 const { spriteKind, spriteHtml, spriteDefsHtml, spriteCss } = require('./dashboard-sprites.cjs');
 
 const PAGE_RELOAD_SECONDS = 300;
@@ -291,23 +292,26 @@ const LABEL = { working: 'working', review: 'needs you', blocked: 'blocked', don
 const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const snapshotLine = (l) => l.trimStart().startsWith('❯') ? '<span class="ghost">' + esc(l) + '  ← prompt line: may be a ghost suggestion</span>' : esc(l);
 const drawer = document.querySelector('.drawer');
+const KIND_LABEL = { html: 'HTML', video: 'Video', pdf: 'PDF', image: 'Image', svg: 'Image', text: 'Text' };
+const fileRowHtml = (f) => '<div class="frow"><div class="top"><span class="tag">' + esc(KIND_LABEL[f.kind] || f.kind) + '</span><a class="flink" href="' + esc(f.href) + '" target="_blank" rel="noopener noreferrer">' + esc(f.name) + '</a><span class="age">' + esc(f.age) + '</span></div><div class="where">' + esc(f.dir) + '</div></div>';
 function openDrawer(id) {
   const a = ITEMS[id]; if (!a) return;
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('sel', c.dataset.id === id));
   const live = a.win !== '-';
   const jump = live ? 'tmux select-window -t ' + a.session + ':' + a.win : 'cd ' + a.where + ' && claude --resume ' + a.id;
   const jumpHref = live ? 'tmuxjump://' + encodeURIComponent(a.session) + '/' + a.win : 'tmuxjump://resume/' + encodeURIComponent(a.id);
-  const ask = (a.status === 'review' || a.status === 'blocked') && a.summary ? '<div class="askbox ' + a.status + '">' + esc(a.summary) + '</div>' : '';
+  const ask = (a.status === 'review' || a.status === 'blocked') && a.summary ? '<div class="askbox ' + a.status + '">' + (a.summaryHtml || esc(a.summary)) + '</div>' : '';
+  const files = a.files && a.files.length ? '<h5>Files</h5><div class="files">' + a.files.map(fileRowHtml).join('') + '</div>' : '';
   const livePane = window.dashboardDrawer ? window.dashboardDrawer(a) : '';
   drawer.innerHTML = \`
     <div class="dhead"><span class="pill"><span class="dot s-\${a.status}"></span>\${LABEL[a.status]}\${a.win !== '-' ? ' \\u00b7 ' + esc(a.win) + ' \\u00b7 ' + esc(a.pane) : ''}</span><button class="x" title="Close (Esc)">\\u2715</button></div>
     <h2>\${esc(a.tab)}</h2>\${a.goal ? '<div class="goal">' + esc(a.goal) + '</div>' : ''}\${ask}
-    \${a.flags.map((f) => '<div class="askbox flag">\\u26a0 ' + esc(f) + '</div>').join('')}\${livePane}
+    \${a.flags.map((f) => '<div class="askbox flag">\\u26a0 ' + esc(f) + '</div>').join('')}\${files}\${livePane}
     <div class="kv"><span>Task id</span><span>\${esc(a.id)}</span><span>Workdir</span><span>\${esc(a.where)}</span>
       <span>Model</span><span>\${esc(a.model)}/\${esc(a.effort)}</span>\${a.ctxMeter ? '<span>Context</span><span>' + a.ctxMeter + '</span>' : ''}
       <span>Phase</span><span>\${esc(a.phase || '-')}</span><span>Since</span><span>\${esc(a.since)}</span>
       <span>Last active</span><span>\${a.activity ? (a.activity === 'now' ? 'now' : esc(a.activity) + ' ago') : a.closedAgo ? 'archived ' + esc(a.closedAgo) + ' ago, tab closed' : 'tab closed'}</span></div>
-    <h5>Ledger notes</h5><div class="tl">\${a.notes.length ? a.notes.slice().reverse().map(([t, n]) => '<div><b>' + esc(t) + '</b>' + esc(n) + '</div>').join('') : '<div>no notes yet</div>'}</div>
+    <h5>Ledger notes</h5><div class="tl">\${a.notes.length ? a.notes.slice().reverse().map(([t, n]) => '<div><b>' + esc(t) + '</b>' + (a.notesHtml ? n : esc(n)) + '</div>').join('') : '<div>no notes yet</div>'}</div>
     \${a.snapshot.length && !livePane ? '<h5>Pane snapshot \\u00b7 ' + esc(GENERATED_AT) + '</h5><pre>' + a.snapshot.map(snapshotLine).join('\\n') + '</pre><div class="hint">Last lines of tmux capture-pane. A \\u276f line may be Claude\\'s grey suggestion, not text the worker typed.</div>' : ''}
     \${jump ? '<div class="cmd desktop-only"><code>' + esc(jump) + '</code><button class="btn" data-copy="' + esc(jump) + '">Copy</button><a class="btn" href="' + esc(jumpHref) + '">' + (live ? 'Open in terminal' : 'Resume in terminal') + '</a></div>' : ''}\`;
   document.body.classList.add('open');
@@ -373,7 +377,7 @@ if (location.hash) openDrawer(decodeURIComponent(location.hash.slice(1)));
 
 const liveUrl = () => `http://127.0.0.1:${process.env.COORDINATOR_DASHBOARD_PORT || DEFAULT_PORT}/`;
 
-// options.served = { csrf, nonce, closable, replyable, remote } for the page the local server sends;
+// options.served = { csrf, nonce, closable, replyable, remote, files } for the page the local server sends;
 // without it the page is the read-only file:// copy. remote marks a page served through the tailnet.
 const render = (items, options = {}) => {
   const { served } = options;
@@ -384,6 +388,7 @@ const render = (items, options = {}) => {
   const metaRefresh = served ? '' : `<meta http-equiv="refresh" content="${PAGE_RELOAD_SECONDS}">`;
   const refreshHref = served ? '/' : 'tmuxjump://refresh';
   const actions = served ? ui.headerActionsHtml : ui.readOnlyHintHtml(liveUrl());
+  const filesButton = served && served.files ? '<a class="btn quiet" href="/files">Files</a>' : '';
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 ${metaRefresh}
@@ -391,9 +396,9 @@ ${metaRefresh}
 ${faviconLink(items)}
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
-<style>${css}${ui.actionsCss}${spriteCss}</style>
+<style>${css}${ui.actionsCss}${spriteCss}${served && served.files ? filesCss : ''}</style>
 <script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body${served && served.remote ? ' class="remote"' : ''}>
-<div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
+<div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}${filesButton}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
 ${spriteDefsHtml(items.map((a) => spriteKind({ status: a.status, live: a.win !== '-' })))}
 <div class="board">${COLUMNS.map((c) => columnHtml(items, c, served)).join('')}</div>
 <div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
@@ -412,7 +417,7 @@ const writePage = (stateDir, out, options) => {
   }
 };
 
-module.exports = { DEFAULT_PORT, collectItems, render, writePage };
+module.exports = { DEFAULT_PORT, css, collectItems, render, writePage };
 
 if (require.main === module) {
   const [stateDir, out] = process.argv.slice(2);
