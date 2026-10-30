@@ -6,8 +6,9 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { DEFAULT_PORT, css, collectItems, render, writePage } = require('./dashboard.cjs');
+const { DEFAULT_PORT, css, collectProfileItems, render, writePage } = require('./dashboard.cjs');
 const actions = require('./dashboard-actions.cjs');
+const { PRIMARY_PROFILE, loadProfiles, taskKey, parseTaskKey } = require('./profiles.cjs');
 const { classifyRequest, loadTailnetConfig } = require('./dashboard-tailnet.cjs');
 const { loadFilePolicy } = require('./dashboard-files-policy.cjs');
 const { createArtifactIndex } = require('./dashboard-files-index.cjs');
@@ -126,19 +127,52 @@ const appendAudit = (file, entry) => {
   fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 };
 
+// A request names a profile (or a task key carrying one); a missing name means the primary, so a
+// page opened before profiles existed keeps working.
+const profileOf = (context, name) => {
+  const profile = context.profiles.find((p) => p.name === (name || context.profiles[0].name));
+  if (!profile) throw new actions.ActionError('Unknown profile.');
+  return profile;
+};
+
+const coordinatorScope = (context, profile) => ({
+  name: profile.name,
+  session: profile.session,
+  excludeSessions: context.profiles.filter((p) => p !== profile && p.session).map((p) => p.session),
+});
+
+const TASK_KEY_PATTERN = /^(?:[a-z0-9][a-z0-9-]{0,31}\/)?[A-Za-z0-9._-]{1,100}$/;
+
+const taskOf = (context, key) => {
+  if (typeof key !== 'string' || !TASK_KEY_PATTERN.test(key)) throw new actions.ActionError('Invalid task id.');
+  const { profile, id } = parseTaskKey(key);
+  return { profile: profileOf(context, profile), id };
+};
+
+const withProfile = (profile, result) => (result && typeof result === 'object' ? { ...result, profile: profile.name } : result);
+
 const ROUTES = {
-  '/api/message': (context, body) => actions.sendToCoordinator(body.text),
-  '/api/reply': (context, body) => actions.replyToTask(context.stateDir, body.id, body.text),
-  '/api/coordinator/focus': () => actions.focusCoordinator(),
-  '/api/tabs/close': (context, body) => actions.closeTaskTab(context.stateDir, body.id),
-  '/api/tabs/close-done': (context) => actions.closeAllDoneTabs(context.stateDir),
+  '/api/message': (context, body) => {
+    const profile = profileOf(context, body.profile);
+    return actions.sendToCoordinator(body.text, coordinatorScope(context, profile)).then((r) => withProfile(profile, r));
+  },
+  '/api/reply': (context, body) => {
+    const { profile, id } = taskOf(context, body.id);
+    return actions.replyToTask(profile.stateDir, id, body.text).then((r) => withProfile(profile, r));
+  },
+  '/api/coordinator/focus': (context, body) => actions.focusCoordinator(coordinatorScope(context, profileOf(context, body.profile))),
+  '/api/tabs/close': (context, body) => {
+    const { profile, id } = taskOf(context, body.id);
+    return actions.closeTaskTab(profile.stateDir, id);
+  },
+  '/api/tabs/close-done': (context, body) => actions.closeAllDoneTabs(profileOf(context, body.profile).stateDir),
 };
 
 // Typed text reaches a terminal, so whatever an action reports as typed is kept in a private log.
 const auditTyped = (context, result) => {
   if (!result || typeof result !== 'object' || !result.task) return;
   try {
-    appendAudit(context.auditFile, { at: new Date().toISOString(), task: result.task, source: context.source, text: result.text });
+    appendAudit(context.auditFile, { at: new Date().toISOString(), profile: result.profile || PRIMARY_PROFILE, task: result.task, source: context.source, text: result.text });
   } catch (err) {
     console.error('[dashboard] writing the audit log failed:', err.message);
   }
@@ -225,9 +259,16 @@ const handleFilesPage = (req, res, context) => {
 const handlePage = (req, res, context) => {
   if (context.url.pathname === '/files') return handleFilesPage(req, res, context);
   if (context.url.pathname === '/api/peek') {
-    return handlePeek(req, res, context, () => actions.peekTask(context.stateDir, context.url.searchParams.get('id')));
+    return handlePeek(req, res, context, async () => {
+      const { profile, id } = taskOf(context, context.url.searchParams.get('id'));
+      return actions.peekTask(profile.stateDir, id);
+    });
   }
-  if (context.url.pathname === '/api/coordinator/peek') return handlePeek(req, res, context, actions.peekCoordinator);
+  if (context.url.pathname === '/api/coordinator/peek') {
+    return handlePeek(req, res, context, async () =>
+      actions.peekCoordinator(coordinatorScope(context, profileOf(context, context.url.searchParams.get('profile')))),
+    );
+  }
   if (context.url.pathname !== '/') return send(res, 404, 'Not found');
   if (context.url.searchParams.has('key')) {
     if (!safeEqual(context.url.searchParams.get('key'), context.key)) return send(res, 401, LOCKED_PAGE);
@@ -236,16 +277,20 @@ const handlePage = (req, res, context) => {
   if (!safeEqual(readCookie(req.headers.cookie, COOKIE), context.key)) return send(res, 401, LOCKED_PAGE);
   const nonce = crypto.randomBytes(16).toString('base64');
   const panes = actions.listPanes();
+  const keysOf = (pick) => new Set(context.profiles.flatMap((p) => [...pick(p.stateDir, panes)].map((id) => taskKey(p.name, id))));
   const served = {
     csrf: context.csrf,
     nonce,
-    closable: actions.closableTaskIds(context.stateDir, panes),
-    replyable: actions.replyableTaskIds(context.stateDir, panes),
+    closable: keysOf(actions.closableTaskIds),
+    replyable: keysOf(actions.replyableTaskIds),
     remote: context.via === 'tailnet',
     files: Boolean(context.files),
   };
-  const items = collectItems(context.stateDir);
-  const html = render(context.files ? decorateItems(items, { stateDir: context.stateDir, ...context.files }) : items, { served });
+  // The file viewer's roots cover the primary profile only, so only its cards get file links.
+  const items = collectProfileItems(context.profiles);
+  const primary = items.filter((a) => a.profile === context.profiles[0].name);
+  const decorated = context.files ? decorateItems(primary, { stateDir: context.stateDir, ...context.files }) : primary;
+  const html = render([...decorated, ...items.filter((a) => a.profile !== context.profiles[0].name)], { served, profiles: context.profiles });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
 };
 
@@ -253,7 +298,8 @@ const handlePage = (req, res, context) => {
 const createFileViewer = (policy) => (policy ? { policy, signer: createSigner(), index: createArtifactIndex(policy) } : null);
 
 // tailnet = { host, logins } admits requests proxied by `tailscale serve`; null keeps it local-only.
-const createDashboardServer = ({ stateDir, key, tailnet = null, auditFile = defaultAuditFile(), files = null }) => {
+const createDashboardServer = ({ stateDir, profiles = null, key, tailnet = null, auditFile = defaultAuditFile(), files = null }) => {
+  const knownProfiles = profiles || [{ name: PRIMARY_PROFILE, label: 'Twism', stateDir, session: '', harness: 'claude' }];
   const csrf = crypto.randomBytes(32).toString('base64url');
   const allowAction = createRateLimiter(RATE_MAX_ACTIONS);
   const allowPeek = createRateLimiter(RATE_MAX_PEEKS);
@@ -264,6 +310,7 @@ const createDashboardServer = ({ stateDir, key, tailnet = null, auditFile = defa
     const context = {
       ...arrival,
       stateDir,
+      profiles: knownProfiles,
       key,
       csrf,
       allowAction,
@@ -311,7 +358,8 @@ const main = () => {
   const key = loadOrCreateKey();
   const tailnet = loadTailnetConfig();
   const policy = loadFilePolicy();
-  const server = createDashboardServer({ stateDir, key, tailnet, files: createFileViewer(policy) });
+  const profiles = loadProfiles({ primaryStateDir: stateDir });
+  const server = createDashboardServer({ stateDir, profiles, key, tailnet, files: createFileViewer(policy) });
   const regenerate = () => {
     try {
       writePage(stateDir, out);
@@ -327,6 +375,7 @@ const main = () => {
     regenerate();
     setInterval(regenerate, refreshSeconds * 1000);
     console.log(`[dashboard] serving on http://${HOST}:${portFromEnv()}/ (open the keyed URL from \`agentctl.sh dashboard --url\`)`);
+    console.log(`[dashboard] profiles: ${profiles.map((p) => `${p.name} (${p.stateDir})`).join(', ')}`);
     console.log(
       tailnet
         ? `[dashboard] also accepting https://${tailnet.host}/ through \`tailscale serve\` for ${tailnet.logins.join(', ')}`

@@ -4,13 +4,51 @@
 set -euo pipefail
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PRIMARY_PROFILE=twism
+# Every profile but the primary is a shell env file; the vars below are all it may set.
+PROFILE_VARS=(COORDINATOR_STATE_DIR COORDINATOR_DEFAULT_REPO AGENTCTL_LABEL AGENTCTL_SESSION AGENTCTL_HARNESS
+  AGENTCTL_ALLOWED_HARNESSES AGENTCTL_MODEL AGENTCTL_COORDINATOR_MODEL AGENTCTL_DENY_ROOTS AGENTCTL_SCRUB_ENV)
+PROFILE="${AGENTCTL_PROFILE:-$PRIMARY_PROFILE}"
+if [[ ${1:-} == --profile ]]; then
+  PROFILE="${2:-}"
+  shift 2 || shift
+fi
+if [[ ! $PROFILE =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; then
+  echo "agentctl: invalid profile name: '$PROFILE'" >&2
+  exit 1
+fi
+PROFILE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/agentctl/profiles/$PROFILE.env"
+# A pane of one profile carries that profile's vars; they must never leak into another profile.
+if [[ $PROFILE != "${AGENTCTL_PROFILE:-$PRIMARY_PROFILE}" || $PROFILE != "$PRIMARY_PROFILE" ]]; then
+  unset "${PROFILE_VARS[@]}"
+fi
+if [[ -f $PROFILE_FILE ]]; then
+  # shellcheck disable=SC1090
+  source "$PROFILE_FILE"
+elif [[ $PROFILE != "$PRIMARY_PROFILE" ]]; then
+  echo "agentctl: no profile '$PROFILE' ($PROFILE_FILE)" >&2
+  exit 1
+fi
+HARNESS="${AGENTCTL_HARNESS:-claude}"
+ALLOWED_HARNESSES="${AGENTCTL_ALLOWED_HARNESSES:-$HARNESS}"
+PROFILE_SESSION="${AGENTCTL_SESSION:-}"
+SCRUB_ENV="${AGENTCTL_SCRUB_ENV:-}"
+DENY_ROOTS="${AGENTCTL_DENY_ROOTS:-}"
 DEFAULT_REPO="${COORDINATOR_DEFAULT_REPO:-$HOME/workspace/twism/platform/monorepo}"
 # Lives under the coordinator's cwd (DEFAULT_REPO) because the agent sandbox only lets a session
 # write inside its cwd.
 STATE_DIR="${COORDINATOR_STATE_DIR:-$DEFAULT_REPO/.claude/coordinator}"
 TASKS_DIR="$STATE_DIR/tasks"
 STANDING_NOTES="$STATE_DIR/notes.md"
-DASHBOARD_FILE="$STATE_DIR/status.html"
+# The status page shows every profile and is always generated from the primary profile's ledger.
+if [[ $PROFILE == "$PRIMARY_PROFILE" ]]; then
+  PRIMARY_STATE_DIR="${AGENTCTL_PRIMARY_STATE_DIR:-$STATE_DIR}"
+else
+  PRIMARY_STATE_DIR="${AGENTCTL_PRIMARY_STATE_DIR:-$HOME/workspace/twism/platform/monorepo/.claude/coordinator}"
+fi
+DASHBOARD_FILE="$PRIMARY_STATE_DIR/status.html"
+REPORT_RETRIES="${AGENTCTL_REPORT_RETRIES:-40}"
+REPORT_RETRY_SECONDS="${AGENTCTL_REPORT_RETRY_SECONDS:-15}"
 DASHBOARD_REFRESH_SECONDS=300
 # Claude Code keeps at most 10,000 characters of SessionStart hook output in context.
 BRIEF_LIMIT=9500
@@ -19,13 +57,18 @@ NOTES_PER_TASK=5
 # reserves ~33k, so 150k leaves ~70k of conversation between compactions.
 COORDINATOR_COMPACT_WINDOW=150000
 COORDINATOR_ROLE="You are the coordinator session. The user hands you tasks and initiatives; you delegate each one to a worker Claude session in its own tmux tab and keep track of them in the agentctl ledger. Load the coordinator skill before acting on any request."
+CODEX_PLAYBOOK="$(dirname "$(dirname "$SCRIPT_PATH")")/CODEX.md"
 
 usage() {
   cat <<'EOF'
 Usage:
+  agentctl.sh [--profile <name>] <command> ...
+      Profiles other than twism (the default) live in ~/.config/agentctl/profiles/<name>.env;
+      AGENTCTL_PROFILE sets the default, and spawned tabs inherit their profile.
   agentctl.sh spawn --name <tab-name> --brief <file> --coordinator <session-name> [options]
       --id <id>              stable task id (default: slug of --name)
-      --model <model>        opus | sonnet | haiku | full model id (default: sonnet)
+      --harness <h>          claude | codex (default: the profile's harness)
+      --model <model>        opus | sonnet | haiku | full model id (default: the profile's, else sonnet)
       --effort <level>       low | medium | high | xhigh | max
       --repo <dir>           git repo to work in (default: the monorepo)
       --base <ref>           worktree start point (default: origin's default branch, fetched first)
@@ -38,6 +81,8 @@ Usage:
   agentctl.sh note <id> "<text>"            append a dated line to the task's ledger
   agentctl.sh note --standing "<text>"      append an instruction that spans tasks
   agentctl.sh done <id> ["<summary>"]       archive the task (drops out of brief and ls)
+  agentctl.sh report <id> done|blocked|question|progress "<text>"
+                                            a worker's report: noted in the ledger and typed into its coordinator
   agentctl.sh brief                         standing instructions + active tasks with recent notes
   agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 5 min
   agentctl.sh dashboard --serve             serve the page with actions on 127.0.0.1 (and keep the file fresh)
@@ -52,6 +97,51 @@ EOF
 }
 
 die() { echo "agentctl: $*" >&2; exit 1; }
+
+self_command() {
+  if [[ $PROFILE == "$PRIMARY_PROFILE" ]]; then
+    printf 'bash %s' "$SCRIPT_PATH"
+  else
+    printf 'bash %s --profile %s' "$SCRIPT_PATH" "$PROFILE"
+  fi
+}
+
+harness_allowed() { [[ " ${ALLOWED_HARNESSES//,/ } " == *" $1 "* ]]; }
+
+# Twism work runs on the Claude subscription only: never through a gateway or another config dir.
+guard_primary_env() {
+  [[ $PROFILE == "$PRIMARY_PROFILE" ]] || return 0
+  [[ -z ${ANTHROPIC_BASE_URL:-} ]] || die "ANTHROPIC_BASE_URL is set; profile $PROFILE only runs on the Claude subscription"
+  [[ -z ${CLAUDE_CONFIG_DIR:-} ]] || die "CLAUDE_CONFIG_DIR is set; profile $PROFILE only runs with the default ~/.claude"
+}
+
+guard_dir() {
+  local dir root
+  dir="$(readlink -f "$1")"
+  [[ -n $DENY_ROOTS ]] || return 0
+  while IFS= read -r root; do
+    [[ -n $root ]] || continue
+    root="$(readlink -f "$root")"
+    if [[ $dir == "$root" || $dir == "$root"/* ]]; then
+      die "$dir is under $root, which is not allowed for profile $PROFILE"
+    fi
+  done < <(tr ':' '\n' <<<"$DENY_ROOTS")
+}
+
+scrub_env() {
+  local name
+  [[ -n $SCRUB_ENV ]] || return 0
+  while IFS= read -r name; do
+    if [[ $name =~ $SCRUB_ENV ]]; then unset "$name"; fi
+  done < <(compgen -e)
+}
+
+codex_effort() {
+  case "$1" in
+    max) echo xhigh ;;
+    *) echo "$1" ;;
+  esac
+}
 
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -c1-48 | sed -E 's/-+$//'
@@ -82,7 +172,7 @@ caller_session() {
 
 # Fire-and-forget: the page is a convenience and must never fail or slow the calling command.
 refresh_dashboard() {
-  (node "$(dirname "$SCRIPT_PATH")/dashboard.cjs" "$STATE_DIR" "$DASHBOARD_FILE" </dev/null >/dev/null 2>&1 &) || true
+  (node "$(dirname "$SCRIPT_PATH")/dashboard.cjs" "$PRIMARY_STATE_DIR" "$DASHBOARD_FILE" </dev/null >/dev/null 2>&1 &) || true
 }
 
 update_meta() {
@@ -94,6 +184,19 @@ update_meta() {
 
 worker_footer() {
   local coordinator="$1" id="$2"
+  if [[ $HARNESS != claude ]]; then
+    cat <<EOF
+
+---
+## Reporting (appended by the coordinator's spawn script)
+- You are a worker session spawned by the coordinator of profile \`$PROFILE\`; your task id is \`$id\`.
+- When you finish, get blocked, or need a decision from the user, report to the coordinator with
+  \`$(self_command) report $id done|blocked|question|progress "<1-3 lines with links and file paths>"\`.
+  It notes the ledger and types the report into the coordinator's prompt.
+- The coordinator owns this tmux tab's name; don't rename it.
+EOF
+    return
+  fi
   cat <<EOF
 
 ---
@@ -110,7 +213,7 @@ default_base() {
 }
 
 cmd_spawn() {
-  local name="" brief="" coordinator="" id="" model="sonnet" effort="" repo="$DEFAULT_REPO"
+  local name="" brief="" coordinator="" id="" model="" effort="" repo="$DEFAULT_REPO" harness="$HARNESS"
   local base="" branch="" cwd="" permission_mode="" session=""
   while (($#)); do
     case "$1" in
@@ -119,6 +222,7 @@ cmd_spawn() {
       --coordinator) coordinator="$2"; shift 2 ;;
       --id) id="$2"; shift 2 ;;
       --model) model="$2"; shift 2 ;;
+      --harness) harness="$2"; shift 2 ;;
       --effort) effort="$2"; shift 2 ;;
       --repo) repo="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
@@ -133,19 +237,28 @@ cmd_spawn() {
   [[ -n $name ]] || die "--name is required"
   [[ -f $brief ]] || die "--brief must point to an existing file"
   [[ -n $coordinator ]] || die "--coordinator is required (your own ListAgents name)"
+  harness_allowed "$harness" || die "harness $harness is not allowed for profile $PROFILE (allowed: $ALLOWED_HARNESSES)"
+  [[ $harness == claude ]] && guard_primary_env
+  if [[ -z $model ]]; then
+    model="${AGENTCTL_MODEL:-}"
+    [[ -n $model || $harness != claude ]] || model=sonnet
+  fi
 
   id="${id:-$(slugify "$name")}"
   [[ -n $id ]] || die "could not derive an id from --name; pass --id"
   local task_dir="$TASKS_DIR/$id"
   [[ ! -e $task_dir ]] || die "task '$id' already exists ($task_dir); pass another --id"
 
-  session="${session:-$(caller_session)}"
-  repo="$(cd "$repo" && pwd)"
+  session="${session:-${PROFILE_SESSION:-$(caller_session)}}"
   local mode workdir
   if [[ -n $cwd ]]; then
     mode="cwd"
     workdir="$(cd "$cwd" && pwd)"
+    guard_dir "$workdir"
   else
+    repo="$(cd "$repo" && pwd)"
+    guard_dir "$repo"
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || die "$repo is not a git repo; pass --repo <repo> or --cwd <dir>"
     mode="worktree"
     workdir="$repo/.claude/worktrees/$id"
     base="${base:-$(default_base "$repo")}"
@@ -159,21 +272,22 @@ cmd_spawn() {
     --arg repo "$repo" --arg mode "$mode" --arg workdir "$workdir" --arg base "$base" \
     --arg branch "$branch" --arg permissionMode "$permission_mode" --arg session "$session" \
     --arg coordinator "$coordinator" --arg createdAt "$(date -Iseconds)" \
+    --arg profile "$PROFILE" --arg harness "$harness" \
     '{id:$id, name:$name, model:$model, effort:$effort, repo:$repo, mode:$mode, workdir:$workdir,
       base:$base, branch:$branch, permissionMode:$permissionMode, session:$session,
-      coordinator:$coordinator, createdAt:$createdAt}' >"$task_dir/meta.json"
+      coordinator:$coordinator, createdAt:$createdAt, profile:$profile, harness:$harness}' >"$task_dir/meta.json"
 
   local start_dir="$repo" created window_id pane_id
   if [[ $mode == cwd ]]; then start_dir="$workdir"; fi
   created="$(tmux new-window -d -P -F '#{window_id} #{pane_id}' -t "$session:" -n "$name" \
-    -c "$start_dir" -e "COORDINATOR_STATE_DIR=$STATE_DIR" \
+    -c "$start_dir" -e "COORDINATOR_STATE_DIR=$STATE_DIR" -e "AGENTCTL_PROFILE=$PROFILE" \
     "bash $(printf %q "$SCRIPT_PATH") _run $(printf %q "$id")")"
   window_id="${created% *}"
   pane_id="${created#* }"
   name_window "$window_id" "$name"
   update_meta "$task_dir" --arg w "$window_id" --arg p "$pane_id" '.windowId=$w | .paneId=$p'
   refresh_dashboard
-  echo "spawned $id -> tab '$name' ($session $window_id $pane_id, $model, $mode: $workdir)"
+  echo "spawned $id -> tab '$name' ($session $window_id $pane_id, $harness ${model:-default model}, $mode: $workdir)"
 }
 
 ensure_worktrees_ignored() {
@@ -212,11 +326,14 @@ cmd_run() {
   set_phase() { printf '%s\n' "$1" >"$task_dir/phase" 2>/dev/null || true; }
   export PATH="$HOME/.local/bin:$PATH"
 
-  local workdir model effort permission_mode
+  local workdir model effort permission_mode harness
   workdir="$(field workdir)"
   model="$(field model)"
   effort="$(field effort)"
   permission_mode="$(field permissionMode)"
+  harness="$(field harness)"
+  harness="${harness:-claude}"
+  export AGENT_PROFILE="$PROFILE" AGENTCTL_PROFILE="$PROFILE"
 
   if [[ $(field mode) == worktree ]]; then
     set_phase setting-up
@@ -228,11 +345,20 @@ cmd_run() {
   fi
 
   cd "$workdir"
-  local args=(-n "$id" --model "$model")
-  if [[ -n $effort ]]; then args+=(--effort "$effort"); fi
-  if [[ -n $permission_mode ]]; then args+=(--permission-mode "$permission_mode"); fi
+  local prompt="Read your task brief at $task_dir/brief.md and carry it out."
   set_phase running
-  claude "${args[@]}" "Read your task brief at $task_dir/brief.md and carry it out." || true
+  if [[ $harness == codex ]]; then
+    scrub_env
+    local args=(-C "$workdir" -s workspace-write -a on-request)
+    if [[ -n $model ]]; then args+=(-m "$model"); fi
+    if [[ -n $effort ]]; then args+=(-c "model_reasoning_effort=\"$(codex_effort "$effort")\""); fi
+    codex "${args[@]}" "$prompt" || true
+  else
+    local args=(-n "$id" --model "$model")
+    if [[ -n $effort ]]; then args+=(--effort "$effort"); fi
+    if [[ -n $permission_mode ]]; then args+=(--permission-mode "$permission_mode"); fi
+    claude "${args[@]}" "$prompt" || true
+  fi
   set_phase exited
   echo "[agentctl] claude exited; shell left open in $workdir"
   exec "${SHELL:-bash}" -i
@@ -359,8 +485,44 @@ cmd_done() {
   echo "archived $id"
 }
 
+cmd_report() {
+  (($# >= 3)) || die 'usage: report <id> done|blocked|question|progress "<text>"'
+  local id="$1" kind="$2" task_dir text
+  shift 2
+  [[ $kind =~ ^(done|blocked|question|progress)$ ]] || die "report kind must be done|blocked|question|progress, not '$kind'"
+  task_dir="$(require_task "$id")"
+  text="$*"
+  printf -- '- %s [%s] %s\n' "$(stamp)" "$kind" "$text" >>"$task_dir/notes.md"
+  refresh_dashboard
+  deliver_report "[$id] $kind: $text"
+}
+
+# The coordinator may be showing a dialog; the note is already in the ledger, so delivery retries
+# in the background and never fails the worker's command.
+deliver_report() {
+  local sender message="$1"
+  sender="$(dirname "$SCRIPT_PATH")/coordinator-send.cjs"
+  if node "$sender" "$PRIMARY_STATE_DIR" "$PROFILE" "$message"; then
+    echo "reported to the $PROFILE coordinator"
+    return 0
+  fi
+  if ((REPORT_RETRIES > 0)); then
+    (
+      for ((i = 0; i < REPORT_RETRIES; i++)); do
+        sleep "$REPORT_RETRY_SECONDS"
+        node "$sender" "$PRIMARY_STATE_DIR" "$PROFILE" "$message" >/dev/null 2>&1 && exit 0
+      done
+    ) </dev/null >/dev/null 2>&1 &
+    disown
+    echo "noted in the ledger; the coordinator can't take input right now, retrying for $((REPORT_RETRIES * REPORT_RETRY_SECONDS))s"
+  else
+    echo "noted in the ledger; the coordinator didn't get it (it reads the ledger brief on its next reset)"
+  fi
+}
+
 cmd_dashboard() {
   local generator server
+  [[ $PROFILE == "$PRIMARY_PROFILE" ]] || die "the dashboard serves every profile; run it without --profile"
   generator="$(dirname "$SCRIPT_PATH")/dashboard.cjs"
   server="$(dirname "$SCRIPT_PATH")/dashboard-server.cjs"
   case "${1:-}" in
@@ -387,6 +549,7 @@ cmd_resume() {
   local id="$1" task_dir workdir
   export PATH="$HOME/.local/bin:$PATH"
   task_dir="$(require_task "$id")"
+  [[ $(jq -r '.harness // "claude"' "$task_dir/meta.json") == claude ]] || die "resume only handles Claude tasks for now; run \`codex resume\` in the task's workdir"
   workdir="$(jq -r '.workdir // ""' "$task_dir/meta.json")"
   if [[ ! -d $workdir ]]; then
     echo "agentctl: workdir of '$id' is gone ($workdir); its session can't be resumed from here" >&2
@@ -439,9 +602,9 @@ render_brief() {
   local source="$1" task_dir
   local task_list=()
   mapfile -t task_list < <(task_dirs false)
-  echo "# Coordinator ledger (loaded on $source, $(stamp))"
+  echo "# Coordinator ledger (profile $PROFILE, loaded on $source, $(stamp))"
   echo
-  echo "This is your state; the conversation may have been cleared or compacted. Keep it current with \`bash ~/.claude/skills/coordinator/scripts/agentctl.sh\`: \`note <id> \"...\"\` for every worker report and user decision, \`note --standing \"...\"\` for instructions that span tasks, \`done <id>\` once a task is finished."
+  echo "This is your state; the conversation may have been cleared or compacted. Keep it current with \`$(self_command)\`: \`note <id> \"...\"\` for every worker report and user decision, \`note --standing \"...\"\` for instructions that span tasks, \`done <id>\` once a task is finished."
   echo
   echo "## Standing instructions"
   if [[ -s $STANDING_NOTES ]]; then cat "$STANDING_NOTES"; else echo "(none)"; fi
@@ -470,17 +633,36 @@ coordinator_settings() {
                               hooks: [{type: "command", command: $hook}]}]}}'
 }
 
-# The served dashboard types into the pane carrying this option, so exactly one pane may hold it.
+# The served dashboard types into the pane carrying this option, so exactly one pane per profile may
+# hold it. A marked pane without a profile option predates profiles and belongs to the primary.
 mark_coordinator_pane() {
-  local pane role
-  while read -r pane role; do
-    if [[ $role == coordinator && $pane != "$1" ]]; then tmux set-option -p -u -t "$pane" @agentctl-role; fi
-  done < <(tmux list-panes -a -F '#{pane_id} #{@agentctl-role}')
-  tmux set-option -p -t "$1" @agentctl-role coordinator
+  local pane role profile
+  while IFS='|' read -r pane role profile; do
+    if [[ $role == coordinator && $pane != "$1" && ${profile:-$PRIMARY_PROFILE} == "$PROFILE" ]]; then
+      tmux set-option -p -u -t "$pane" @agentctl-role \; set-option -p -u -t "$pane" @agentctl-profile
+    fi
+  done < <(tmux list-panes -a -F '#{pane_id}|#{@agentctl-role}|#{@agentctl-profile}')
+  tmux set-option -p -t "$1" @agentctl-role coordinator \; set-option -p -t "$1" @agentctl-profile "$PROFILE"
+}
+
+# New panes in the profile's session start without the scrubbed vars, whatever env the tmux server
+# was started with, and know their profile.
+prepare_session_env() {
+  local session="$1" name
+  tmux set-environment -t "$session" AGENT_PROFILE "$PROFILE" \; set-environment -t "$session" AGENTCTL_PROFILE "$PROFILE"
+  [[ -n $SCRUB_ENV ]] || return 0
+  while IFS= read -r name; do
+    if [[ $name =~ $SCRUB_ENV ]]; then tmux set-environment -t "$session" -r "$name"; fi
+  done < <({ compgen -e; tmux show-environment -g | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'; } | sort -u)
+}
+
+codex_coordinator_prompt() {
+  printf '%s\n\n' "You are the coordinator session of the ${AGENTCTL_LABEL:-$PROFILE} profile. The user hands you tasks; you delegate each one to a worker Codex session in its own tmux tab and keep track of them in the agentctl ledger. Read your playbook at $CODEX_PLAYBOOK before acting on any request. Run every agentctl command as \`$(self_command) <command>\`."
+  render_brief startup
 }
 
 cmd_coordinator() {
-  local model="opus" effort="" name="coordinator" compact_window="$COORDINATOR_COMPACT_WINDOW"
+  local model="${AGENTCTL_COORDINATOR_MODEL:-}" effort="" name="coordinator" compact_window="$COORDINATOR_COMPACT_WINDOW"
   while (($#)); do
     case "$1" in
       --model) model="$2"; shift 2 ;;
@@ -490,11 +672,25 @@ cmd_coordinator() {
       *) die "unknown coordinator option: $1" ;;
     esac
   done
+  [[ $HARNESS == claude ]] && guard_primary_env
+  export PATH="$HOME/.local/bin:$PATH"
   if [[ -n ${TMUX_PANE:-} ]]; then
     name_window "$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}')" "$name"
     mark_coordinator_pane "$TMUX_PANE"
+    [[ $PROFILE == "$PRIMARY_PROFILE" ]] || prepare_session_env "$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}')"
   fi
   cd "$DEFAULT_REPO"
+  if [[ $HARNESS == codex ]]; then
+    local prompt
+    prompt="$(codex_coordinator_prompt)"
+    scrub_env
+    export AGENT_PROFILE="$PROFILE" AGENTCTL_PROFILE="$PROFILE"
+    local codex_args=(-C "$DEFAULT_REPO" -s workspace-write -a on-request)
+    if [[ -n $model ]]; then codex_args+=(-m "$model"); fi
+    if [[ -n $effort ]]; then codex_args+=(-c "model_reasoning_effort=\"$(codex_effort "$effort")\""); fi
+    exec codex "${codex_args[@]}" "$prompt"
+  fi
+  model="${model:-opus}"
   local args=(-n "$name" --model "$model" --append-system-prompt "$COORDINATOR_ROLE"
     --settings "$(coordinator_settings "$compact_window")")
   if [[ -n $effort ]]; then args+=(--effort "$effort"); fi
@@ -510,6 +706,7 @@ main() {
     ls) cmd_ls "$@" ;;
     note) cmd_note "$@" ;;
     done) cmd_done "$@" ;;
+    report) cmd_report "$@" ;;
     brief) cmd_brief "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
     resume) cmd_resume "$@" ;;

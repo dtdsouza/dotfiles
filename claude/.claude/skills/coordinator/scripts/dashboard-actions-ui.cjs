@@ -40,6 +40,10 @@ const actionsCss = `.actions{display:flex;align-items:center;gap:8px;flex-wrap:w
 
 const headerActionsHtml = `<div class="actions"><form class="msg" autocomplete="off"><input name="text" maxlength="2000" placeholder="Message coordinator" aria-label="Message coordinator" enterkeyhint="send"><button class="btn" type="submit">Send</button></form><button class="btn quiet" data-act="coordinator" type="button">Coordinator</button><button class="btn quiet desktop-only" data-act="focus" type="button">Go to coordinator</button></div>`;
 
+// One per swimlane: every control names its profile, so nothing typed here can reach the other lane.
+const laneActionsHtml = (profile, label) =>
+  `<div class="actions"><form class="msg" data-profile="${esc(profile)}" autocomplete="off"><input name="text" maxlength="2000" placeholder="Message the ${esc(label)} coordinator" aria-label="Message the ${esc(label)} coordinator" enterkeyhint="send"><button class="btn" type="submit">Send</button></form><button class="btn quiet" data-act="coordinator" data-profile="${esc(profile)}" type="button">Coordinator</button><button class="btn quiet desktop-only" data-act="focus" data-profile="${esc(profile)}" type="button">Go to coordinator</button></div>`;
+
 const replyFormHtml = (id) =>
   `<form class="reply" data-reply="${esc(id)}" autocomplete="off"><input name="text" maxlength="2000" placeholder="Reply to this worker" aria-label="Reply to ${esc(id)}" enterkeyhint="send"><button class="btn" type="submit">Send</button></form>`;
 
@@ -50,7 +54,8 @@ const readOnlyHintHtml = (liveUrl) =>
 
 const closeButtonHtml = (id) => `<button class="mini kill" data-close="${esc(id)}" type="button">Close tab</button>`;
 
-const closeAllButtonHtml = (count) => (count > 1 ? `<button class="mini kill" data-close-all type="button">Close all ${count}</button>` : '');
+const closeAllButtonHtml = (count, profile = '') =>
+  count > 1 ? `<button class="mini kill" data-close-all${profile ? ` data-profile="${esc(profile)}"` : ''} type="button">Close all ${count}</button>` : '';
 
 // The drawer hooks (dashboardDrawer, dashboardDrawerOpened, dashboardDrawerClosed) are called by
 // the base page script in dashboard.cjs, which also works without them for the file:// copy.
@@ -77,15 +82,17 @@ async function run(button, path, body, after) {
   button.disabled = true;
   try { toast(await act(path, body), true); if (after) after(); } catch (err) { toast(err.message, false); } finally { button.disabled = false; }
 }
-const msgForm = document.querySelector('.msg');
-const msgInput = msgForm.querySelector('input');
 const typing = () => [...document.querySelectorAll('.msg input, .reply input')].some((i) => i === document.activeElement || i.value !== '');
 window.dashboardBusy = () => typing() || document.body.classList.contains('open') || !!document.querySelector('.armed');
-msgForm.addEventListener('submit', (e) => {
+const profileBody = (el, body) => (el && el.dataset.profile ? { ...body, profile: el.dataset.profile } : body);
+document.addEventListener('submit', (e) => {
+  const form = e.target.closest('form.msg');
+  if (!form) return;
   e.preventDefault();
-  const text = msgInput.value.trim();
-  if (!text) return msgInput.focus();
-  run(msgForm.querySelector('button'), '/api/message', { text }, () => { msgInput.value = ''; msgInput.blur(); });
+  const input = form.querySelector('input');
+  const text = input.value.trim();
+  if (!text) return input.focus();
+  run(form.querySelector('button'), '/api/message', profileBody(form, { text }), () => { input.value = ''; input.blur(); });
 });
 function armed(button, label) {
   if (button.classList.contains('armed')) { button.classList.remove('armed'); clearTimeout(button.armTimer); return true; }
@@ -97,9 +104,12 @@ function armed(button, label) {
 }
 let peekTimer;
 let peekId = '';
-// Task ids never contain ':', so this cannot collide with a ledger task.
+// Task ids never contain ':', so these cannot collide with a ledger task; ':coordinator' alone is the primary profile's.
 const COORDINATOR_PEEK = ':coordinator';
-const peekUrl = (id) => (id === COORDINATOR_PEEK ? '/api/coordinator/peek' : '/api/peek?id=' + encodeURIComponent(id));
+const coordinatorPeekId = (profile) => (profile ? COORDINATOR_PEEK + ':' + profile : COORDINATOR_PEEK);
+const peekProfile = (id) => (id.startsWith(COORDINATOR_PEEK + ':') ? id.slice(COORDINATOR_PEEK.length + 1) : '');
+const isCoordinatorPeek = (id) => id === COORDINATOR_PEEK || id.startsWith(COORDINATOR_PEEK + ':');
+const peekUrl = (id) => (isCoordinatorPeek(id) ? '/api/coordinator/peek' + (peekProfile(id) ? '?profile=' + encodeURIComponent(peekProfile(id)) : '') : '/api/peek?id=' + encodeURIComponent(id));
 const peekBoxHtml = (id) => '<h5>Live pane</h5><div class="peek" data-peek-id="' + esc(id) + '"><pre>loading…</pre><div class="hint"><span>connecting…</span><span>last ${PEEK_POLL_MS / 1000}s refresh, ANSI stripped</span></div></div>';
 async function refreshPeek() {
   const box = document.querySelector('.drawer .peek');
@@ -115,7 +125,7 @@ async function refreshPeek() {
     pre.textContent = data.lines.length ? data.lines.join('\\n') : '(the pane is empty)';
     if (atBottom) pre.scrollTop = pre.scrollHeight;
     status.classList.remove('err');
-    status.firstChild.textContent = 'live \u00b7 ' + new Date(data.at).toLocaleTimeString('en-GB', { hour12: false }) + (data.command && data.command !== 'claude' ? ' \u00b7 pane runs ' + data.command : '');
+    status.firstChild.textContent = 'live \u00b7 ' + new Date(data.at).toLocaleTimeString('en-GB', { hour12: false }) + (data.command && !['claude', 'codex'].includes(data.command) ? ' \u00b7 pane runs ' + data.command : '');
   } catch (err) {
     status.classList.add('err');
     status.firstChild.textContent = err.message;
@@ -128,14 +138,16 @@ function startPeek(id) {
   refreshPeek();
   peekTimer = setInterval(() => { if (!document.hidden) refreshPeek(); }, ${PEEK_POLL_MS});
 }
-function openCoordinatorDrawer() {
+function openCoordinatorDrawer(profile) {
   document.querySelectorAll('.card.sel').forEach((c) => c.classList.remove('sel'));
-  drawer.innerHTML = '<div class="dhead"><span class="pill">coordinator</span><button class="x" title="Close (Esc)">\u2715</button></div><h2>Coordinator</h2>'
-    + peekBoxHtml(COORDINATOR_PEEK)
-    + '<form class="reply" data-reply="' + COORDINATOR_PEEK + '" autocomplete="off"><input name="text" maxlength="2000" placeholder="Message coordinator" aria-label="Message coordinator" enterkeyhint="send"><button class="btn" type="submit">Send</button></form>'
+  const peek = coordinatorPeekId(profile);
+  const label = profile ? ((typeof PROFILES !== 'undefined' && PROFILES.find((p) => p.name === profile)) || { label: profile }).label + ' coordinator' : 'Coordinator';
+  drawer.innerHTML = '<div class="dhead"><span class="pill">coordinator</span><button class="x" title="Close (Esc)">\u2715</button></div><h2>' + esc(label) + '</h2>'
+    + peekBoxHtml(peek)
+    + '<form class="reply" data-reply="' + esc(peek) + '" autocomplete="off"><input name="text" maxlength="2000" placeholder="Message coordinator" aria-label="Message coordinator" enterkeyhint="send"><button class="btn" type="submit">Send</button></form>'
     + '<div class="hint">Typed into the coordinator\\'s prompt with a [via dashboard] prefix. Permission dialogs and menus must be answered in the terminal.</div>';
   document.body.classList.add('open');
-  startPeek(COORDINATOR_PEEK);
+  startPeek(peek);
 }
 window.dashboardDrawer = (a) => REPLYABLE.has(a.id)
   ? peekBoxHtml(a.id)
@@ -152,8 +164,10 @@ document.addEventListener('submit', (e) => {
   const input = form.querySelector('input');
   const text = input.value.trim();
   if (!text) return input.focus();
-  const toCoordinator = form.dataset.reply === COORDINATOR_PEEK;
-  run(form.querySelector('button'), toCoordinator ? '/api/message' : '/api/reply', toCoordinator ? { text } : { id: form.dataset.reply, text }, () => { input.value = ''; input.blur(); if (peekId === form.dataset.reply) setTimeout(refreshPeek, 600); });
+  const toCoordinator = isCoordinatorPeek(form.dataset.reply);
+  const profile = peekProfile(form.dataset.reply);
+  const body = toCoordinator ? (profile ? { text, profile } : { text }) : { id: form.dataset.reply, text };
+  run(form.querySelector('button'), toCoordinator ? '/api/message' : '/api/reply', body, () => { input.value = ''; input.blur(); if (peekId === form.dataset.reply) setTimeout(refreshPeek, 600); });
 });
 const reloadSoon = () => setTimeout(reloadIfIdle, 1200);
 document.addEventListener('click', (e) => {
@@ -165,13 +179,14 @@ document.addEventListener('click', (e) => {
     document.querySelector('.drawer .peek')?.scrollIntoView({ block: 'start' });
     return;
   }
-  if (e.target.closest('[data-act="coordinator"]')) return openCoordinatorDrawer();
+  const coordinator = e.target.closest('[data-act="coordinator"]');
+  if (coordinator) return openCoordinatorDrawer(coordinator.dataset.profile || '');
   const focus = e.target.closest('[data-act="focus"]');
-  if (focus) return run(focus, '/api/coordinator/focus');
+  if (focus) return run(focus, '/api/coordinator/focus', profileBody(focus, {}));
   const close = e.target.closest('[data-close]');
   if (close) { e.stopPropagation(); if (armed(close, 'Confirm close')) run(close, '/api/tabs/close', { id: close.dataset.close }, reloadSoon); return; }
   const all = e.target.closest('[data-close-all]');
-  if (all) { e.stopPropagation(); if (armed(all, 'Confirm close all')) run(all, '/api/tabs/close-done', {}, reloadSoon); }
+  if (all) { e.stopPropagation(); if (armed(all, 'Confirm close all')) run(all, '/api/tabs/close-done', profileBody(all, {}), reloadSoon); }
 }, true);
 setInterval(reloadIfIdle, ${SERVED_RELOAD_SECONDS * 1000});
 `;
@@ -180,6 +195,7 @@ module.exports = {
   SERVED_RELOAD_SECONDS,
   actionsCss,
   headerActionsHtml,
+  laneActionsHtml,
   readOnlyHintHtml,
   replyFormHtml,
   peekButtonHtml,

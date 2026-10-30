@@ -129,8 +129,12 @@ alias cce='claude --plugin-dir ~/code/compound-engineering-plugin/plugins/compou
 alias vim=nvim
 alias second-brain='cd ~/workspace/github/second-brain'
 
-# zsh_secrets (machine-local, untracked): secret exports live here, e.g. VAULT_ADDR / VAULT_TOKEN
-[ -f ~/.zsh_secrets ] && source ~/.zsh_secrets
+# Work secrets and overrides stay out of the personal agent profile (tmux session `personal`, set by
+# `agentctl.sh --profile personal coordinator`), so its Codex tabs never see Twism tokens.
+if [[ ${AGENT_PROFILE:-} != personal ]]; then
+  # zsh_secrets (machine-local, untracked): secret exports live here, e.g. VAULT_ADDR / VAULT_TOKEN
+  [ -f ~/.zsh_secrets ] && source ~/.zsh_secrets
 
-# machine-local overrides (untracked): work-specific aliases and functions, e.g. labs-claude
-[ -f ~/.zshrc.local ] && source ~/.zshrc.local
+  # machine-local overrides (untracked): work-specific aliases and functions, e.g. labs-claude
+  [ -f ~/.zshrc.local ] && source ~/.zshrc.local
+fi

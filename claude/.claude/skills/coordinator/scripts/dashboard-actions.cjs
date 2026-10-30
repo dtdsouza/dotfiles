@@ -6,7 +6,11 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const ROLE_OPTION = '@agentctl-role';
+const PROFILE_OPTION = '@agentctl-profile';
 const COORDINATOR_ROLE = 'coordinator';
+// A pane marked before profiles existed carries no profile option and belongs to the primary one.
+const DEFAULT_PROFILE = 'twism';
+const HARNESS_COMMANDS = ['claude', 'codex'];
 const PROTECTED_WINDOW_NAMES = ['coordinator', 'dashboard'];
 const MAX_MESSAGE_CHARS = 2000;
 // Neutralises Claude Code's input prefixes (`!` shell mode, `/` commands) and tells the coordinator
@@ -33,20 +37,25 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // tmux replaces control characters such as \x1f with '_' in -F output, hence the printable '|' separator (name last).
 const listPanes = () =>
-  tmux(['list-panes', '-a', '-F', `#{pane_id}|#{window_id}|#{session_name}|#{pane_current_command}|#{${ROLE_OPTION}}|#{window_name}`])
+  tmux(['list-panes', '-a', '-F', `#{pane_id}|#{window_id}|#{session_name}|#{pane_current_command}|#{${ROLE_OPTION}}|#{${PROFILE_OPTION}}|#{window_name}`])
     .split('\n')
     .filter(Boolean)
     .map((l) => l.split('|'))
-    .map(([id, windowId, session, command, role, ...name]) => ({ id, windowId, session, command, role, windowName: name.join('|') }));
+    .map(([id, windowId, session, command, role, profile, ...name]) => ({ id, windowId, session, command, role, profile, windowName: name.join('|') }));
 
 const capturePane = (paneId) => tmux(['capture-pane', '-p', '-t', paneId]).split('\n');
 
 // The role option is set by `agentctl.sh coordinator`; the window name covers a coordinator that was
-// restarted by hand (`claude --resume` carries no `-n coordinator` on its command line).
+// restarted by hand (`claude --resume` carries no `-n coordinator` on its command line). A scope
+// ({ name, session, excludeSessions }) keeps each profile to its own coordinator: an unmarked window
+// only counts inside the profile's session, or outside every other profile's session.
 // `list-panes -a` repeats a pane once per session of a group (`tmux new -t twism`), so count pane ids.
-const resolveCoordinator = (panes) => {
-  const byRole = panes.filter((p) => p.role === COORDINATOR_ROLE);
-  const matches = byRole.length ? byRole : panes.filter((p) => p.windowName === 'coordinator');
+const inScopeSession = (pane, { session = '', excludeSessions = [] }) => (session ? pane.session === session : !excludeSessions.includes(pane.session));
+
+const resolveCoordinator = (panes, scope = {}) => {
+  const profile = scope.name || DEFAULT_PROFILE;
+  const byRole = panes.filter((p) => p.role === COORDINATOR_ROLE && (p.profile || DEFAULT_PROFILE) === profile);
+  const matches = byRole.length ? byRole : panes.filter((p) => p.windowName === 'coordinator' && !p.role && inScopeSession(p, scope));
   const candidates = matches.filter((p, index) => matches.findIndex((other) => other.id === p.id) === index);
   if (!candidates.length) throw new ActionError('No coordinator pane found: start it with `agentctl.sh coordinator`.');
   if (candidates.length > 1) {
@@ -67,10 +76,15 @@ const sanitizeMessage = (text) => {
   return clean;
 };
 
-// Claude Code's input box is a `❯` line right under a horizontal rule. A permission dialog also
-// draws `❯ 1. Yes`, and an Enter there would approve it, so any numbered choice refuses too.
-const promptIsReady = (lines) => {
+// Claude Code's input box is a `❯` line right under a horizontal rule; Codex's composer is a `›`
+// line. Both draw their dialogs (permissions, trust, updates) as `❯ 1. Yes` / `› 1. Update now`,
+// and an Enter there would choose for the user, so any numbered choice refuses too.
+const promptIsReady = (lines, harness = 'claude') => {
   const tail = lines.map((l) => l.replace(/\s+$/, '')).filter(Boolean).slice(-PROMPT_SCAN_LINES);
+  if (harness === 'codex') {
+    const hasDialog = tail.some((l) => /›\s*\d+\.|Press enter to continue|Would you like to/.test(l));
+    return !hasDialog && tail.some((l) => /^\s*›(\s|$)/.test(l));
+  }
   const isRule = (l) => /^\s*─{8,}/.test(l);
   const hasInputBox = tail.some((l, i) => i > 0 && isRule(tail[i - 1]) && /^\s*❯/.test(l));
   const hasDialog = tail.some((l) => /❯\s*\d+\.|Do you want to/.test(l));
@@ -85,10 +99,12 @@ const typeLiteral = (paneId, text) => {
   if (trailing) tmuxStrict(['send-keys', '-t', paneId, '-H', ...Array(trailing).fill('3b')]);
 };
 
-const typeIntoClaude = async (pane, text, label) => {
-  const message = MESSAGE_PREFIX + text;
-  if (pane.command !== 'claude') throw new ActionError(`The ${label} pane is running ${pane.command || 'nothing'}, not Claude; nothing was sent.`);
-  if (!promptIsReady(capturePane(pane.id))) {
+const typeIntoAgent = async (pane, text, label, prefix = MESSAGE_PREFIX) => {
+  const message = prefix + text;
+  if (!HARNESS_COMMANDS.includes(pane.command)) {
+    throw new ActionError(`The ${label} pane is running ${pane.command || 'nothing'}, not Claude or Codex; nothing was sent.`);
+  }
+  if (!promptIsReady(capturePane(pane.id), pane.command)) {
     throw new ActionError(`The ${label} is showing a dialog, not its prompt; answer it in the terminal first.`);
   }
   typeLiteral(pane.id, message);
@@ -97,14 +113,14 @@ const typeIntoClaude = async (pane, text, label) => {
 };
 
 // Returns the sanitized text (without the prefix) so the caller can audit exactly what was typed.
-const sendToCoordinator = async (text) => {
+const sendToCoordinator = async (text, scope = {}, prefix = MESSAGE_PREFIX) => {
   const clean = sanitizeMessage(text);
-  await typeIntoClaude(resolveCoordinator(listPanes()), clean, 'coordinator');
+  await typeIntoAgent(resolveCoordinator(listPanes(), scope), clean, 'coordinator', prefix);
   return { message: 'Sent to the coordinator.', task: 'coordinator', text: clean };
 };
 
-const focusCoordinator = async () => {
-  const pane = resolveCoordinator(listPanes());
+const focusCoordinator = async (scope = {}) => {
+  const pane = resolveCoordinator(listPanes(), scope);
   tmuxStrict(['select-window', '-t', pane.windowId]);
   tmuxStrict(['select-pane', '-t', pane.id]);
   return `Switched ${pane.session} to the coordinator tab.`;
@@ -184,11 +200,11 @@ const capturePeek = (pane) => {
 
 const peekTask = async (stateDir, id) => capturePeek(resolveTaskPane(stateDir, id));
 
-const peekCoordinator = async () => capturePeek(resolveCoordinator(listPanes()));
+const peekCoordinator = async (scope = {}) => capturePeek(resolveCoordinator(listPanes(), scope));
 
 const replyToTask = async (stateDir, id, text) => {
   const clean = sanitizeMessage(text);
-  await typeIntoClaude(resolveTaskPane(stateDir, id), clean, `${id} worker`);
+  await typeIntoAgent(resolveTaskPane(stateDir, id), clean, `${id} worker`);
   return { message: `Sent to ${id}.`, task: id, text: clean };
 };
 
@@ -228,6 +244,7 @@ module.exports = {
   MESSAGE_PREFIX,
   PEEK_LINES,
   ROLE_OPTION,
+  PROFILE_OPTION,
   tmux,
   listPanes,
   readLedger,

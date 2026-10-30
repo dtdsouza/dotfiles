@@ -7,6 +7,7 @@ const { tmux } = require('./dashboard-actions.cjs');
 const ui = require('./dashboard-actions-ui.cjs');
 const { filesCss } = require('./dashboard-files-ui.cjs');
 const { spriteKind, spriteHtml, spriteDefsHtml, spriteCss } = require('./dashboard-sprites.cjs');
+const { PRIMARY_PROFILE, loadProfiles, taskKey } = require('./profiles.cjs');
 
 const PAGE_RELOAD_SECONDS = 300;
 const STALE_ON_FOCUS_SECONDS = 60;
@@ -20,7 +21,7 @@ const SHIMMER_MS = 2400;
 const CTX_HIGH_USED_PERCENT = 30;
 const CTX_CRITICAL_USED_PERCENT = 60;
 const NOTE_PREVIEW_CHARS = 220;
-const MODEL_FAMILIES = ['opus', 'sonnet', 'fable', 'haiku'];
+const MODEL_FAMILIES = ['opus', 'sonnet', 'fable', 'haiku', 'gpt'];
 const SUFFIX_STATUS = { review: 'review', blocked: 'blocked', done: 'done' };
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -101,6 +102,8 @@ const buildItem = ({ meta, phase, notes, goal }, win) => {
   ].filter(Boolean);
   return {
     id: meta.id,
+    key: meta.id,
+    profile: PRIMARY_PROFILE,
     tab: win ? win.name : meta.name,
     status,
     win: win ? meta.windowId : '-',
@@ -134,13 +137,16 @@ const collectItems = (stateDir) => {
     .sort((a, b) => b.updated - a.updated);
 };
 
+const collectProfileItems = (profiles) =>
+  profiles.flatMap((p) => collectItems(p.stateDir).map((a) => ({ ...a, profile: p.name, key: taskKey(p.name, a.id) })));
+
 const css = `:root{color-scheme:dark;--bg:#000516;--surface:#0c1121;--fg:#fff;--text:rgba(255,255,255,.7);--muted:rgba(255,255,255,.55);--line:rgba(255,255,255,.1);--soft:rgba(255,255,255,.05);--edge:rgba(255,255,255,.25);
 --green:#baf764;--green-ink:#baf764;--green-30:rgba(186,247,100,.3);--green-12:rgba(186,247,100,.12);--blue-glow:#4a74ff;--amber:#ffc65c;--red:#ff6b6b;--red-45:rgba(255,107,107,.45);--stripe:rgba(255,107,107,.07);
---card-sheen:rgba(255,255,255,.05);--opus:#c7a6ff;--sonnet:#ffae7d;--fable:#ff9bd6;--haiku:#72d9cd;--scrim:rgba(0,5,22,.55);--pre:#e6e9f2;
+--card-sheen:rgba(255,255,255,.05);--opus:#c7a6ff;--sonnet:#ffae7d;--fable:#ff9bd6;--haiku:#72d9cd;--gpt:#7fd1ff;--scrim:rgba(0,5,22,.55);--pre:#e6e9f2;
 --display:"Clash Display",Arial,sans-serif;--body:Inter,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
 @media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f4f6fb;--surface:#fff;--fg:#0b1020;--text:rgba(11,16,32,.78);--muted:rgba(11,16,32,.62);--line:rgba(11,16,32,.12);--soft:rgba(11,16,32,.04);--edge:rgba(11,16,32,.3);
 --green-ink:#3f6b0a;--green-30:rgba(63,107,10,.35);--green-12:rgba(122,190,30,.14);--blue-glow:#2f5bff;--amber:#9a6200;--red:#d93636;--red-45:rgba(217,54,54,.5);--stripe:rgba(217,54,54,.07);
---card-sheen:rgba(11,16,32,.03);--opus:#6a3ed1;--sonnet:#a24c10;--fable:#a7306d;--haiku:#0b7066;--scrim:rgba(11,16,32,.3);--pre:#1b2235}}
+--card-sheen:rgba(11,16,32,.03);--opus:#6a3ed1;--sonnet:#a24c10;--fable:#a7306d;--haiku:#0b7066;--gpt:#0b5f8a;--scrim:rgba(11,16,32,.3);--pre:#1b2235}}
 *{box-sizing:border-box;margin:0}
 body{background:var(--bg);color:var(--text);font:400 14px/1.5 var(--body);-webkit-font-smoothing:antialiased;letter-spacing:-.01em}
 h1,h2{font-family:var(--display);font-weight:600;color:var(--fg);line-height:1.05}
@@ -187,7 +193,7 @@ h1,h2{font-family:var(--display);font-weight:600;color:var(--fg);line-height:1.0
 .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
 .tag{display:inline-flex;align-items:center;gap:5px;border-radius:6px;padding:1px 7px;font:500 11px/18px var(--body);background:var(--soft);border:1px solid var(--line);color:var(--text);white-space:nowrap}
 .tag[class*="m-"]{color:var(--model);border-color:color-mix(in srgb,var(--model) 40%,transparent);background:color-mix(in srgb,var(--model) 10%,transparent)}
-.m-opus{--model:var(--opus)}.m-sonnet{--model:var(--sonnet)}.m-fable{--model:var(--fable)}.m-haiku{--model:var(--haiku)}
+.m-opus{--model:var(--opus)}.m-sonnet{--model:var(--sonnet)}.m-fable{--model:var(--fable)}.m-haiku{--model:var(--haiku)}.m-gpt{--model:var(--gpt)}
 .tag.live{color:var(--green-ink);border-color:var(--green-30)}
 .tag.live::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--green-ink)}
 .meter{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin:-2px 0 12px}
@@ -227,7 +233,21 @@ pre{background:var(--surface);border:1px solid var(--line);border-radius:16px;pa
 .cmd code{flex:1 1 100%;min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:8px 14px;color:var(--fg);font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-all}
 @media (max-width:1100px){.board{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){.topbar{padding:16px}.board{grid-template-columns:minmax(0,1fr);padding:16px;gap:16px}.col{min-height:0;border-radius:24px;padding:14px}.drawer{padding:20px 16px}}
-@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.card.working::after{background-position:50% 0}}`;
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.card.working::after{background-position:50% 0}}
+.lane{margin:0 40px;padding:20px 0 0;border-top:1px solid var(--line)}.lane:first-of-type{border-top:0}
+.lanehead{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+.lanetitle{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.lanetitle h2{font-size:22px}
+.lane .board{padding:0 0 22px}.lane .col{min-height:0}
+.prof{display:inline-flex;align-items:center;border-radius:999px;padding:1px 9px;font:600 11px/18px var(--body);border:1px solid var(--line);color:var(--fg);white-space:nowrap}
+.prof.p0{color:var(--blue-glow);border-color:color-mix(in srgb,var(--blue-glow) 50%,transparent);background:color-mix(in srgb,var(--blue-glow) 10%,transparent)}
+.prof.p1{color:var(--green-ink);border-color:var(--green-30);background:var(--green-12)}
+.feedtop{padding:12px 16px 0}.seg{display:flex;border:1px solid var(--line);border-radius:999px;padding:3px;gap:3px}
+.seg button{flex:1;border:0;border-radius:999px;padding:8px 0;font:600 13px var(--body);color:var(--text);background:transparent;cursor:pointer}
+.seg button.on{background:var(--green-12);color:var(--fg);box-shadow:inset 0 0 0 1px var(--green-30)}
+.coordrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:12px}
+.coordrow button{border:1px solid var(--line);border-radius:18px;padding:10px 12px;background:var(--soft);color:var(--fg);font:500 13px var(--body);text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.feed{padding:4px 16px 24px}.sec{font:600 11px var(--body);color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:18px 2px 10px}
+@media (max-width:640px){.lane{margin:0 16px}}`;
 
 const ctxMeterHtml = (ctx) => {
   const used = 100 - Number(ctx);
@@ -257,22 +277,22 @@ const cardHtml = (a, served) => {
   const wid = live ? `<span class="wid">${esc(a.win)}</span>` : '';
   const jump = jumpCommand(a);
   const copy = `<button class="mini desktop-only" data-copy="${esc(jump)}" title="${esc(jump)}">${live ? 'Copy jump' : 'Copy resume'}</button>`;
-  const close = served && served.closable.has(a.id) ? ui.closeButtonHtml(a.id) : '';
-  const replyable = Boolean(served && served.replyable.has(a.id));
-  const reply = replyable ? ui.replyFormHtml(a.id) : '';
-  const peek = replyable ? ui.peekButtonHtml(a.id) : '';
+  const close = served && served.closable.has(a.key) ? ui.closeButtonHtml(a.key) : '';
+  const replyable = Boolean(served && served.replyable.has(a.key));
+  const reply = replyable ? ui.replyFormHtml(a.key) : '';
+  const peek = replyable ? ui.peekButtonHtml(a.key) : '';
   const age = a.activity ? (a.activity === 'now' ? 'active now' : `active ${a.activity} ago`) : a.closedAgo ? `done ${a.closedAgo === 'now' ? 'just now' : a.closedAgo + ' ago'}` : 'tab closed';
   const sprite = spriteHtml(spriteKind({ status: a.status, live }), a.id);
-  return `<div class="card ${cls}" data-id="${esc(a.id)}" data-updated="${a.updated}">${sprite}<h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}${reply}<div class="foot"><span class="age">${age}</span><span class="acts">${peek}${close}${copy}</span></div></div>`;
+  return `<div class="card ${cls}" data-id="${esc(a.key)}" data-profile="${esc(a.profile)}" data-updated="${a.updated}">${sprite}<h4>${esc(a.tab)}${wid}</h4>${meta}${goal}${note}${a.flags.map((f) => `<div class="warn">⚠ ${esc(f)}</div>`).join('')}${reply}<div class="foot"><span class="age">${age}</span><span class="acts">${peek}${close}${copy}</span></div></div>`;
 };
 
 const FILTERS_HTML = `<div class="filters"><button class="chip" data-range="today">Today</button><button class="chip" data-range="7">7 days</button><button class="chip" data-range="30">30 days</button><button class="chip" data-range="all">All</button><button class="chip" data-range="custom">Custom</button>
 <div class="custom" hidden><input type="date" data-from> <span>to</span> <input type="date" data-to></div></div><div class="empty" hidden>No sessions in this range.</div>`;
 
-const columnHtml = (items, [title, dotClass, status], served) => {
+const columnHtml = (items, [title, dotClass, status], served, profile = '') => {
   const list = items.filter((a) => a.status === status);
   const filters = status === 'done' ? FILTERS_HTML : '';
-  const closeAll = served && status === 'done' ? ui.closeAllButtonHtml(list.filter((a) => served.closable.has(a.id)).length) : '';
+  const closeAll = served && status === 'done' ? ui.closeAllButtonHtml(list.filter((a) => served.closable.has(a.key)).length, profile) : '';
   return `<div class="col" data-status="${status}"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count" data-total="${list.length}">${list.length}</span>${closeAll}</div>${filters}${list.map((a) => cardHtml(a, served)).join('')}</div>`;
 };
 
@@ -283,8 +303,22 @@ const COLUMNS = [
   ['Done', 's-done', 'done'],
 ];
 
-const clientScript = (items, generatedAt) => `
-const ITEMS = ${JSON.stringify(Object.fromEntries(items.map((a) => [a.id, a]))).replace(/</g, '\\u003c')};
+const boardHtml = (items, served, profile) => `<div class="board">${COLUMNS.map((c) => columnHtml(items, c, served, profile)).join('')}</div>`;
+
+// Option 3 of the two-coordinator review: one swimlane per profile, each with its own coordinator console.
+const lanesHtml = (items, profiles, served) =>
+  profiles
+    .map((p, index) => {
+      const mine = items.filter((a) => a.profile === p.name);
+      const where = `${p.session ? `tmux session ${p.session} · ` : ''}${p.harness} · ledger ${p.stateDir.replace(process.env.HOME || '\0', '~')}`;
+      const consoleHtml = served ? ui.laneActionsHtml(p.name, p.label) : '';
+      return `<section class="lane" data-profile="${esc(p.name)}"><div class="lanehead"><div class="lanetitle"><span class="prof p${Math.min(index, 1)}">${esc(p.label)}</span><h2>${esc(p.label)}</h2><span class="meta">${esc(where)}</span></div>${consoleHtml}</div>${boardHtml(mine, served, p.name)}</section>`;
+    })
+    .join('');
+
+const clientScript = (items, generatedAt, profiles = []) => `
+const ITEMS = ${JSON.stringify(Object.fromEntries(items.map((a) => [a.key, a]))).replace(/</g, '\\u003c')};
+const PROFILES = ${JSON.stringify(profiles.map((p, index) => ({ name: p.name, label: p.label, tone: Math.min(index, 1) }))).replace(/</g, '\\u003c')};
 const GENERATED_AT = ${JSON.stringify(generatedAt)};
 const GENERATED_MS = ${Date.now()};
 const STALE_MS = ${STALE_ON_FOCUS_SECONDS * 1000};
@@ -336,8 +370,7 @@ const filterBounds = (f) => {
   if (f.range === 'custom') return [f.from ? new Date(f.from + 'T00:00:00').getTime() : -Infinity, f.to ? new Date(f.to + 'T23:59:59.999').getTime() : Infinity];
   return [-Infinity, Infinity];
 };
-function applyFilter() {
-  const col = document.querySelector('[data-status="done"]');
+function applyFilterTo(col) {
   const [lo, hi] = filterBounds(filter);
   const cards = [...col.querySelectorAll('.card')];
   cards.forEach((c) => { const t = Number(c.dataset.updated) * 1000; c.hidden = !(t >= lo && t <= hi); });
@@ -350,6 +383,7 @@ function applyFilter() {
   custom.querySelector('[data-from]').value = filter.from || '';
   custom.querySelector('[data-to]').value = filter.to || '';
 }
+function applyFilter() { document.querySelectorAll('[data-status="done"]').forEach(applyFilterTo); }
 function setFilter(next) { filter = next; writeFilter(filter); applyFilter(); }
 document.addEventListener('change', (e) => {
   if (e.target.matches('[data-from], [data-to]')) {
@@ -372,6 +406,34 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
 applyFilter();
+// Option 5 of the two-coordinator review: on a phone the lanes become one feed, most urgent first.
+const profileBadge = (name) => { const p = PROFILES.find((x) => x.name === name) || { label: name, tone: 1 }; return '<span class="prof p' + p.tone + '">' + esc(p.label) + '</span>'; };
+function buildPhoneFeed() {
+  const lanes = [...document.querySelectorAll('.lane')];
+  if (lanes.length < 2 || !matchMedia('(max-width: 640px)').matches) return;
+  const top = document.createElement('div');
+  top.className = 'feedtop';
+  top.innerHTML = '<div class="seg">' + ['all', ...PROFILES.map((p) => p.name)].map((n, i) => '<button type="button" data-feed="' + esc(n) + '"' + (i ? '' : ' class="on"') + '>' + (n === 'all' ? 'All' : esc((PROFILES.find((p) => p.name === n) || {}).label || n)) + '</button>').join('') + '</div>'
+    + '<div class="coordrow">' + PROFILES.map((p) => '<button type="button" data-act="coordinator" data-profile="' + esc(p.name) + '">' + profileBadge(p.name) + 'Coordinator</button>').join('') + '</div>';
+  const feed = document.createElement('div');
+  feed.className = 'feed';
+  for (const [title, statuses] of [['Needs you', ['review', 'blocked']], ['Working', ['working']], ['Done', ['done']]]) {
+    const cards = lanes.flatMap((l) => [...l.querySelectorAll('.col')].filter((c) => statuses.includes(c.dataset.status)).flatMap((c) => [...c.querySelectorAll('.card')]));
+    const visible = cards.filter((c) => !c.hidden);
+    feed.insertAdjacentHTML('beforeend', '<div class="sec">' + title + ' · ' + visible.length + '</div>');
+    cards.forEach((c) => { c.querySelector('h4').insertAdjacentHTML('afterbegin', profileBadge(c.dataset.profile) + ' '); feed.appendChild(c); });
+  }
+  lanes[0].before(top);
+  top.after(feed);
+  lanes.forEach((l) => { l.hidden = true; });
+  top.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-feed]');
+    if (!b) return;
+    top.querySelectorAll('[data-feed]').forEach((x) => x.classList.toggle('on', x === b));
+    feed.querySelectorAll('.card').forEach((c) => { c.style.display = b.dataset.feed === 'all' || c.dataset.profile === b.dataset.feed ? '' : 'none'; });
+  });
+}
+buildPhoneFeed();
 if (location.hash) openDrawer(decodeURIComponent(location.hash.slice(1)));
 `;
 
@@ -381,13 +443,15 @@ const liveUrl = () => `http://127.0.0.1:${process.env.COORDINATOR_DASHBOARD_PORT
 // without it the page is the read-only file:// copy. remote marks a page served through the tailnet.
 const render = (items, options = {}) => {
   const { served } = options;
+  const profiles = options.profiles || [];
+  const laned = profiles.length > 1;
   const generatedAt = new Date().toLocaleTimeString('en-GB', { hour12: false });
   const nonce = served ? ` nonce="${served.nonce}"` : '';
   const reloadSeconds = served ? ui.SERVED_RELOAD_SECONDS : PAGE_RELOAD_SECONDS;
   const reloadNote = reloadSeconds >= 60 ? `${reloadSeconds / 60} min` : `${reloadSeconds}s`;
   const metaRefresh = served ? '' : `<meta http-equiv="refresh" content="${PAGE_RELOAD_SECONDS}">`;
   const refreshHref = served ? '/' : 'tmuxjump://refresh';
-  const actions = served ? ui.headerActionsHtml : ui.readOnlyHintHtml(liveUrl());
+  const actions = served ? (laned ? '' : ui.headerActionsHtml) : ui.readOnlyHintHtml(liveUrl());
   const filesButton = served && served.files ? '<a class="btn quiet" href="/files">Files</a>' : '';
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -400,16 +464,17 @@ ${faviconLink(items)}
 <script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body${served && served.remote ? ' class="remote"' : ''}>
 <div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}${filesButton}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
 ${spriteDefsHtml(items.map((a) => spriteKind({ status: a.status, live: a.win !== '-' })))}
-<div class="board">${COLUMNS.map((c) => columnHtml(items, c, served)).join('')}</div>
+${laned ? lanesHtml(items, profiles, served) : boardHtml(items, served, '')}
 <div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
-<script${nonce}>${clientScript(items, generatedAt)}${served ? ui.actionsClientScript(served.csrf, served.replyable) : ''}</script></body></html>`;
+<script${nonce}>${clientScript(items, generatedAt, profiles)}${served ? ui.actionsClientScript(served.csrf, served.replyable) : ''}</script></body></html>`;
 };
 
-const writePage = (stateDir, out, options) => {
+const writePage = (stateDir, out, options = {}) => {
   const tmpFile = `${out}.${process.pid}.tmp`;
+  const profiles = loadProfiles({ primaryStateDir: stateDir });
   fs.mkdirSync(path.dirname(out), { recursive: true });
   try {
-    fs.writeFileSync(tmpFile, render(collectItems(stateDir), options));
+    fs.writeFileSync(tmpFile, render(collectProfileItems(profiles), { ...options, profiles }));
     fs.renameSync(tmpFile, out);
   } catch (err) {
     fs.rmSync(tmpFile, { force: true });
@@ -417,7 +482,7 @@ const writePage = (stateDir, out, options) => {
   }
 };
 
-module.exports = { DEFAULT_PORT, css, collectItems, render, writePage };
+module.exports = { DEFAULT_PORT, css, collectItems, collectProfileItems, render, writePage };
 
 if (require.main === module) {
   const [stateDir, out] = process.argv.slice(2);
