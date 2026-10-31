@@ -81,7 +81,8 @@ before(async () => {
   writeTask(stateDir, { id: 'points-at-coordinator', name: 'x', ...coordinator, archivedAt });
   writeTask(stateDir, { id: 'stale-window', name: 'x', windowId: reused.windowId, paneId: '%999', archivedAt });
 
-  const server = createDashboardServer({ stateDir, key: KEY });
+  // Without its own audit file the server would append these test messages to the user's real log.
+  const server = createDashboardServer({ stateDir, key: KEY, auditFile: path.join(scratch, 'audit.jsonl') });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   env = { server, port: server.address().port, stateDir, typed, coordinator, dashboard, done, working, doneToo, reused };
   const page = await request({ headers: { Host: `127.0.0.1:${env.port}`, Cookie: `${COOKIE}=${KEY}` } });
