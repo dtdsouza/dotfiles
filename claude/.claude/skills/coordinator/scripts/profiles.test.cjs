@@ -68,3 +68,11 @@ describe('task keys', () => {
     assert.deepEqual(parseTaskKey('personal/a-task'), { profile: 'personal', id: 'a-task' });
   });
 });
+
+test('profile artifact roots are optional and expand HOME without changing other profiles', () => {
+  const configHome = tmpDir();
+  writeProfile(configHome, 'personal', 'COORDINATOR_STATE_DIR=$HOME/p/state\nAGENTCTL_FILE_ROOTS=$HOME/p/.claude/tmp/**:$HOME/p/**/.claude/tmp/**\n');
+  const profiles = loadProfiles({ primaryStateDir: '/state/primary', env: { XDG_CONFIG_HOME: configHome }, home: '/home/u' });
+  assert.equal(profiles[1].fileRoots, '/home/u/p/.claude/tmp/**:/home/u/p/**/.claude/tmp/**');
+  assert.equal(profiles[0].fileRoots, undefined);
+});

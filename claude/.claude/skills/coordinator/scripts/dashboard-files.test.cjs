@@ -419,3 +419,72 @@ describe('Files page and drawer', () => {
     }
   });
 });
+
+describe('profile artifact roots', () => {
+  test('discovers central, repo and worktree Personal artifacts but excludes repo source', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agentctl-personal-roots-'));
+    try {
+      const github = path.join(home, 'workspace', 'github');
+      const central = write(path.join(github, '.claude', 'tmp', 'sample-html', 'sample.html'), 'sample');
+      const repo = write(path.join(github, 'repo', '.claude', 'tmp', 'task-a', 'report.html'), 'report');
+      const worktree = write(path.join(github, 'repo', '.claude', 'worktrees', 'wt1', 'docs', 'plan.html'), 'plan');
+      const source = write(path.join(github, 'repo', 'src', 'index.html'), 'source');
+      const profile = { fileRoots: '~/workspace/github/**/.claude/tmp/**:~/workspace/github/**/.claude/worktrees/*/{.claude/tmp,docs,openspec}/**' };
+      const policy = loadFilePolicy({}, home, [profile]);
+      const files = createArtifactIndex(policy).list().map((f) => f.real);
+      for (const file of [central, repo, worktree]) assert.ok(files.includes(file), file);
+      assert.equal(resolveViewable(source, policy).refusal[0], 403);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('augments defaults but respects explicit global roots and off', () => {
+    const profiles = [{ name: 'personal', fileRoots: '/personal/.claude/tmp/**' }];
+    const roots = (policy) => policy.roots.map((r) => r.pattern);
+    assert.ok(roots(loadFilePolicy({}, '/home/u', profiles)).includes('/personal/.claude/tmp/**'));
+    assert.deepEqual(roots(loadFilePolicy({ [ROOTS_ENV]: '/explicit/**' }, '/home/u', profiles)), ['/explicit/**']);
+    assert.equal(loadFilePolicy({ [ROOTS_ENV]: 'off' }, '/home/u', profiles), null);
+  });
+});
+
+describe('Personal files on the shared dashboard', () => {
+  test('links Personal cards and attributes colliding task ids to their own profiles', async () => {
+    const top = fs.mkdtempSync(path.join(os.tmpdir(), 'agentctl-personal-files-'));
+    const primaryState = path.join(top, 'primary-state');
+    const personalState = path.join(top, 'personal-state');
+    const primaryFile = write(path.join(top, 'primary', 'task-a', 'primary.html'), '<title>Primary</title>');
+    const personalFile = write(path.join(top, 'personal', 'task-a', 'sample.html'), '<title>Personal sample</title>');
+    writeTask(primaryState, { id: 'task-a', name: 'task-a' }, `- 2026-10-31 09:00 ${primaryFile}\n`);
+    writeTask(personalState, { id: 'task-a', name: 'task-a', profile: 'personal', harness: 'codex' }, `- 2026-10-31 09:00 ${personalFile}\n`);
+    const policy = loadFilePolicy({ [ROOTS_ENV]: `${top}/primary/**:${top}/personal/**` });
+    const profiles = [
+      { name: 'twism', label: 'Primary', stateDir: primaryState },
+      { name: 'personal', label: 'Personal', stateDir: personalState },
+    ];
+    const server = createDashboardServer({ stateDir: primaryState, profiles, key: KEY, files: { policy, signer: createSigner(), index: createArtifactIndex(policy) } });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const get = (pathname, authenticated = true) => fetch(`http://127.0.0.1:${server.address().port}${pathname}`, { headers: authenticated ? withCookie() : {} });
+    try {
+      const page = await (await get('/')).text();
+      const items = JSON.parse(page.match(/const ITEMS = (\{.*\});\n/)[1].replace(/\\u003c/g, '<'));
+      const personalItem = items['personal/task-a'];
+      assert.equal(personalItem.files.length, 1);
+      assert.equal(personalItem.files[0].name, 'sample.html');
+      assert.match(personalItem.notes[0][1], /class="flink"/);
+      const primaryItem = items['task-a'];
+      assert.deepEqual(primaryItem.files.map((f) => f.name), ['primary.html']);
+      const listing = await (await get('/files')).text();
+      const personalRow = listing.match(/<div class="frow"[^]*?sample\.html[^]*?<\/div><\/div>/)[0];
+      assert.match(personalRow, /href="\/#personal%2Ftask-a"/);
+      const content = await get(personalItem.files[0].href, false);
+      assert.equal(content.status, 200);
+      assert.equal(await content.text(), '<title>Personal sample</title>');
+      assert.match(content.headers.get('content-security-policy'), /sandbox/);
+      assert.equal((await get('/files', false)).status, 401);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      fs.rmSync(top, { recursive: true, force: true });
+    }
+  });
+});

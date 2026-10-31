@@ -13,7 +13,7 @@ const { classifyRequest, loadTailnetConfig } = require('./dashboard-tailnet.cjs'
 const { loadFilePolicy } = require('./dashboard-files-policy.cjs');
 const { createArtifactIndex } = require('./dashboard-files-index.cjs');
 const { VIEW_PREFIX, createSigner, handleView } = require('./dashboard-files-serve.cjs');
-const { decorateItems, filesPageHtml } = require('./dashboard-files-ui.cjs');
+const { createProfileAttribution, decorateItems, filesPageHtml } = require('./dashboard-files-ui.cjs');
 
 const HOST = '127.0.0.1';
 const COOKIE = 'agentctl_dashboard';
@@ -252,7 +252,7 @@ const handleFilesPage = (req, res, context) => {
   if (!safeEqual(readCookie(req.headers.cookie, COOKIE), context.key)) return send(res, 401, LOCKED_PAGE);
   if (!context.allowPeek()) return send(res, 429, 'Too many refreshes; wait a minute.');
   const nonce = crypto.randomBytes(16).toString('base64');
-  const html = filesPageHtml({ stateDir: context.stateDir, ...files, nonce, baseCss: css, remote: context.via === 'tailnet' });
+  const html = filesPageHtml({ stateDir: context.stateDir, profiles: context.profiles, ...files, nonce, baseCss: css, remote: context.via === 'tailnet' });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
 };
 
@@ -286,11 +286,23 @@ const handlePage = (req, res, context) => {
     remote: context.via === 'tailnet',
     files: Boolean(context.files),
   };
-  // The file viewer's roots cover the primary profile only, so only its cards get file links.
-  const items = collectProfileItems(context.profiles);
-  const primary = items.filter((a) => a.profile === context.profiles[0].name);
-  const decorated = context.files ? decorateItems(primary, { stateDir: context.stateDir, ...context.files }) : primary;
-  const html = render([...decorated, ...items.filter((a) => a.profile !== context.profiles[0].name)], { served, profiles: context.profiles });
+  const attribute = context.files ? createProfileAttribution(context.profiles, context.files.policy) : null;
+  const allItems = collectProfileItems(context.profiles);
+  const items = context.profiles.flatMap((profile) => {
+    const own = allItems.filter((item) => item.profile === profile.name);
+    if (!context.files) return own;
+    return decorateItems(own, {
+      stateDir: profile.stateDir,
+      ...context.files,
+      attribute: (file) => {
+        const key = attribute(file);
+        if (!key) return '';
+        const owner = parseTaskKey(key);
+        return owner.profile === profile.name ? owner.id : '';
+      },
+    });
+  });
+  const html = render(items, { served, profiles: context.profiles });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
 };
 
@@ -357,8 +369,8 @@ const main = () => {
   const refreshSeconds = Number(process.env.DASHBOARD_REFRESH_SECONDS || 300);
   const key = loadOrCreateKey();
   const tailnet = loadTailnetConfig();
-  const policy = loadFilePolicy();
   const profiles = loadProfiles({ primaryStateDir: stateDir });
+  const policy = loadFilePolicy(process.env, os.homedir(), profiles);
   const server = createDashboardServer({ stateDir, profiles, key, tailnet, files: createFileViewer(policy) });
   const regenerate = () => {
     try {

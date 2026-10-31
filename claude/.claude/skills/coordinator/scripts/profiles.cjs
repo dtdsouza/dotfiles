@@ -50,6 +50,7 @@ const toProfile = (name, vars, stateDir) => ({
   stateDir,
   session: vars.AGENTCTL_SESSION || '',
   harness: vars.AGENTCTL_HARNESS || 'claude',
+  ...(vars.AGENTCTL_FILE_ROOTS ? { fileRoots: vars.AGENTCTL_FILE_ROOTS } : {}),
 });
 
 // A profile without COORDINATOR_STATE_DIR is skipped: the dashboard must never guess a ledger.

@@ -5,6 +5,7 @@ const path = require('path');
 const { readLedger } = require('./dashboard-actions.cjs');
 const { findNoteRefs, resolveCandidate, collectMentions, createAttribution } = require('./dashboard-files-index.cjs');
 const { viewHref } = require('./dashboard-files-serve.cjs');
+const { taskKey } = require('./profiles.cjs');
 
 const FILES_PAGE_LIMIT = 300;
 const DRAWER_FILES_LIMIT = 20;
@@ -52,12 +53,32 @@ const linkifyText = (text, { bases, policy, signer }) => {
   return html + esc(text.slice(at));
 };
 
+// Explicit ledger mentions win across profiles. Inferred ownership must be unambiguous: two
+// profiles may use the same task id, so a folder name alone cannot select either one.
+const createProfileAttribution = (profiles, policy) => {
+  const mentions = new Map();
+  const attributes = profiles.map((profile) => {
+    const metas = readLedger(profile.stateDir).filter((m) => m.id);
+    const { owner } = collectMentions(profile.stateDir, metas, policy);
+    owner.forEach((id, real) => mentions.set(real, taskKey(profile.name, id)));
+    return { profile, attribute: createAttribution(metas, owner) };
+  });
+  return (file) => {
+    if (mentions.has(file.real)) return mentions.get(file.real);
+    const candidates = attributes.flatMap(({ profile, attribute }) => {
+      const id = attribute(file);
+      return id ? [taskKey(profile.name, id)] : [];
+    });
+    return candidates.length === 1 ? candidates[0] : '';
+  };
+};
+
 // Adds `files` (newest first) and HTML notes to each served item; the file:// copy never gets them.
-const decorateItems = (items, { stateDir, policy, index, signer }) => {
+const decorateItems = (items, { stateDir, policy, index, signer, attribute: sharedAttribute }) => {
   const metas = readLedger(stateDir).filter((m) => m.id);
   const byId = new Map(metas.map((m) => [m.id, m]));
   const { byTask, owner } = collectMentions(stateDir, metas, policy);
-  const attribute = createAttribution(metas, owner);
+  const attribute = sharedAttribute || createAttribution(metas, owner);
   const indexed = new Map();
   index.list().forEach((f) => {
     const id = attribute(f);
@@ -118,9 +139,8 @@ apply();
 `;
 
 // baseCss is the dashboard's own stylesheet, so the page shares its palette and light mode.
-const filesPageHtml = ({ stateDir, policy, index, signer, nonce, baseCss, remote }) => {
-  const metas = readLedger(stateDir).filter((m) => m.id);
-  const attribute = createAttribution(metas, collectMentions(stateDir, metas, policy).owner);
+const filesPageHtml = ({ stateDir, profiles, policy, index, signer, nonce, baseCss, remote }) => {
+  const attribute = createProfileAttribution(profiles || [{ name: 'twism', stateDir }], policy);
   const files = index.list().slice(0, FILES_PAGE_LIMIT);
   const chips = [['all', 'All'], ['html', 'Reports'], ['video', 'Videos'], ['pdf', 'PDFs']]
     .map(([value, label]) => `<button class="chip" type="button" data-kind-filter="${value}">${label}</button>`)
@@ -136,4 +156,4 @@ const filesPageHtml = ({ stateDir, policy, index, signer, nonce, baseCss, remote
 <script nonce="${nonce}">${filesPageScript}</script></body></html>`;
 };
 
-module.exports = { filesCss, decorateItems, filesPageHtml };
+module.exports = { filesCss, createProfileAttribution, decorateItems, filesPageHtml };

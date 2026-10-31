@@ -88,6 +88,30 @@ Discovery is the default because it follows a machine rename after a restart and
   - Delete `~/.local/state/agentctl/dashboard.key` and restart: every cookie dies too.
   - Start with `COORDINATOR_DASHBOARD_FILE_ROOTS=off`: the viewer is gone.
 
+## Personal artifacts
+
+The shared dashboard also serves Personal artifacts when its profile file
+(`~/.config/agentctl/profiles/personal.env`) contains `AGENTCTL_FILE_ROOTS`, as in
+`profiles/personal.env.example`. These colon-separated roots augment the defaults; they do
+not replace another profile's folders. An explicit server-wide
+`COORDINATOR_DASHBOARD_FILE_ROOTS` takes precedence over all profile roots, including `off`.
+Restart the existing dashboard server after changing profile roots.
+
+For Personal repo tasks, save final reports under `<workdir>/.claude/tmp/<task-id>/`.
+For non-repo tasks, use `~/workspace/github/.claude/tmp/<task-id>/`. Copy finished output
+from `/tmp` into that folder, including relative image/video assets, and include the final
+absolute path in the task's ledger report. **Files** discovers HTML, videos and PDFs within
+30 seconds; task notes link other supported types too. Personal drawers have their own file
+links, and Files uses `personal/<task-id>` links so matching task names across profiles do
+not point at the wrong card. Ambiguous folder-only ownership is left unattributed; a ledger
+path resolves it.
+
+Open **Files** from the existing authenticated phone dashboard, or the task drawer. The
+sample is `~/workspace/github/.claude/tmp/sample-html/sample.html` on `personal/sample-html`.
+Use a newly minted link from the dashboard if an individual `/v/` link has expired (one hour)
+or the server has restarted. This uses the same cookie, Tailscale restrictions and sandboxed
+viewer; no proxy or tailnet policy change is needed.
+
 ## Still to check on a real phone
 
 - iOS Safari and Android Chrome keep the `SameSite=Strict` cookie after the key redirect and after a home-screen launch.

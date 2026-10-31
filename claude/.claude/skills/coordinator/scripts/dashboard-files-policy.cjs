@@ -74,10 +74,13 @@ const parseRoots = (text, home = os.homedir()) =>
     .filter(Boolean);
 
 // null turns the viewer off.
-const loadFilePolicy = (env = process.env, home = os.homedir()) => {
+const loadFilePolicy = (env = process.env, home = os.homedir(), profiles = []) => {
   const configured = (env[ROOTS_ENV] || '').trim();
   if (configured === 'off') return null;
-  const roots = parseRoots(configured || DEFAULT_ROOTS.join(':'), home);
+  // An explicit global setting remains authoritative, including `off`. Profiles only augment
+  // the defaults, so a Personal setting cannot replace another profile's configured policy.
+  const defaults = [...DEFAULT_ROOTS, ...profiles.map((p) => p.fileRoots).filter(Boolean)];
+  const roots = parseRoots(configured || defaults.join(':'), home);
   return roots.length ? { roots } : null;
 };
 

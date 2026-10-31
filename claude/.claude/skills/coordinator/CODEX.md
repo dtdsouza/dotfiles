@@ -34,6 +34,10 @@ Run every agentctl command exactly as your launch prompt shows (`bash <path>/age
 
 The brief is the worker's only context. In order: **Goal** (one sentence, the outcome), **Context** (links, paths, every decision the user made), **Done when** (the observable end state), **Boundaries** (what needs the user's OK first; what is out of scope). The spawn script appends the reporting instructions.
 
+For tasks that generate reviewable files, require the final artifact folder and absolute path in
+the worker report: `<workdir>/.claude/tmp/<task-id>/` for repo tasks, or
+`~/workspace/github/.claude/tmp/<task-id>/` for non-repo tasks (see Generated files on the phone).
+
 ## Naming tabs
 
 You own every tab name. Short kebab-case for the goal: `plot-twist-onboarding-copy`, `mimic-game-physics-bug`. Rename with `rename <id> <new-name>`; append `-blocked` or `-review` when the tab needs the user, and drop the suffix when work resumes.
@@ -51,3 +55,25 @@ Your conversation is disposable; the ledger is your memory. Your launch prompt c
 - `ls`: every active task with its tab, state, model and workdir.
 - Workers report by running `agentctl report`, which notes the ledger and types `[via agentctl] [<id>] done|blocked|question|progress: ...` into your prompt. Relay it to the user in one or two lines, rename the tab if its state changed, and ask the user only when the worker needs a decision. The note is already in the ledger, so don't note it again.
 - Messages from the user's dashboard arrive prefixed `[via dashboard]`.
+
+## Generated files on the phone
+
+Personal uses the existing dashboard's **Files** view and signed file viewer. For a repo task,
+write reports, demos, videos and PDFs under the workdir's `.claude/tmp/<task-id>/`. Keep each
+HTML report's images and videos in the same task folder so relative asset links work. For
+non-repository tasks or output created under `/tmp`, copy the final artifact folder to
+`~/workspace/github/.claude/tmp/<task-id>/`; `/tmp` itself is not served and is not durable.
+
+Include the final absolute path in the worker's `report` message. The ledger note makes it a
+clickable link on the Personal card, attributes it to that task in **Files**, and preserves the
+location after the worker tab closes. A folder named for the task also helps discovery.
+HTML, video and PDF files appear in **Files** automatically (the index refreshes within 30 s);
+other supported assets, including Markdown, can be linked from a note.
+
+The Personal profile's `AGENTCTL_FILE_ROOTS` in `~/.config/agentctl/profiles/personal.env`
+allowlists only `~/workspace/github/**/.claude/tmp/` and worktree artifact/docs folders
+(see `profiles/personal.env.example`). Restart the existing dashboard after changing roots or
+server code. An explicit server-wide `COORDINATOR_DASHBOARD_FILE_ROOTS` overrides these
+additions, and `off` still disables the entire viewer. Use the existing phone dashboard URL
+and open **Files** or the task's drawer; individual signed `/v/` links expire after one hour.
+The sample is at `~/workspace/github/.claude/tmp/sample-html/sample.html`.
