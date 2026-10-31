@@ -1,12 +1,9 @@
 // tmux side of the served dashboard's actions: find the coordinator, type into it or into a worker,
 // peek at a worker's pane, focus the coordinator, and close the tabs of finished tasks. Every check
 // here fails closed.
-const fs = require('fs');
-const path = require('path');
-const { execFileSync } = require('child_process');
+const { tmux, tmuxStrict } = require('./tmux.cjs');
+const { ROLE_OPTION, PROFILE_OPTION, TASK_OPTION, ADOPT_HINT, readLedger, listPanes, matchTaskTabs } = require('./task-tabs.cjs');
 
-const ROLE_OPTION = '@agentctl-role';
-const PROFILE_OPTION = '@agentctl-profile';
 const COORDINATOR_ROLE = 'coordinator';
 // A pane marked before profiles existed carries no profile option and belongs to the primary one.
 const DEFAULT_PROFILE = 'twism';
@@ -24,24 +21,7 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 
 class ActionError extends Error {}
 
-const tmuxArgs = (args) => (process.env.COORDINATOR_TMUX_SOCKET ? ['-L', process.env.COORDINATOR_TMUX_SOCKET, ...args] : args);
-const tmuxStrict = (args) => execFileSync('tmux', tmuxArgs(args), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-const tmux = (args) => {
-  try {
-    return tmuxStrict(args);
-  } catch {
-    return '';
-  }
-};
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// tmux replaces control characters such as \x1f with '_' in -F output, hence the printable '|' separator (name last).
-const listPanes = () =>
-  tmux(['list-panes', '-a', '-F', `#{pane_id}|#{window_id}|#{session_name}|#{pane_current_command}|#{${ROLE_OPTION}}|#{${PROFILE_OPTION}}|#{window_name}`])
-    .split('\n')
-    .filter(Boolean)
-    .map((l) => l.split('|'))
-    .map(([id, windowId, session, command, role, profile, ...name]) => ({ id, windowId, session, command, role, profile, windowName: name.join('|') }));
 
 const capturePane = (paneId) => tmux(['capture-pane', '-p', '-t', paneId]).split('\n');
 
@@ -126,18 +106,6 @@ const focusCoordinator = async (scope = {}) => {
   return `Switched ${pane.session} to the coordinator tab.`;
 };
 
-const readLedger = (stateDir) => {
-  const tasksDir = path.join(stateDir, 'tasks');
-  if (!fs.existsSync(tasksDir)) return [];
-  return fs.readdirSync(tasksDir).flatMap((id) => {
-    try {
-      return [JSON.parse(fs.readFileSync(path.join(tasksDir, id, 'meta.json'), 'utf8'))];
-    } catch {
-      return [];
-    }
-  });
-};
-
 const protectedWindowIds = (panes) => {
   const ids = panes
     .filter((p) => p.role === COORDINATOR_ROLE || PROTECTED_WINDOW_NAMES.includes(p.windowName) || p.id === process.env.TMUX_PANE)
@@ -145,17 +113,26 @@ const protectedWindowIds = (panes) => {
   return new Set(ids);
 };
 
-// Window ids restart at @0 with the tmux server, so the window must still hold the task's own pane
-// in the task's session before it counts as that task's tab.
-const closeRefusal = (meta, panes, guarded) => {
-  if (!meta) return 'is not in the ledger';
-  if (!meta.archivedAt) return 'is not done in the ledger';
-  if (!meta.windowId) return 'has no tab on record';
-  if (guarded.has(meta.windowId)) return 'has a protected tab (coordinator or dashboard)';
-  const windowPanes = panes.filter((p) => p.windowId === meta.windowId);
-  if (!windowPanes.length) return 'has no open tab';
-  if (!windowPanes.some((p) => p.id === meta.paneId && p.session === meta.session)) return 'no longer owns that tab';
-  return '';
+// A task scope is { stateDir, profile, sessionProfiles }: the profile the request names, its ledger,
+// and which tmux session belongs to which profile. The client names a task, never a pane; the pane
+// must carry that task's tag and that profile, whatever ids the ledger recorded.
+const ownTab = (meta, panes, scope) => {
+  const pane = matchTaskTabs([meta], panes, scope).get(meta.id);
+  if (!pane) return { refusal: null };
+  if (pane.legacy) return { refusal: `has an untagged tab; ${ADOPT_HINT}` };
+  return { pane };
+};
+
+const closeTarget = (meta, panes, guarded, scope) => {
+  if (!meta) return { refusal: 'is not in the ledger' };
+  if (!meta.archivedAt) return { refusal: 'is not done in the ledger' };
+  if (!meta.windowId) return { refusal: 'has no tab on record' };
+  if (guarded.has(meta.windowId)) return { refusal: 'has a protected tab (coordinator or dashboard)' };
+  const { pane, refusal } = ownTab(meta, panes, scope);
+  if (refusal) return { refusal };
+  if (!pane) return { refusal: panes.some((p) => p.windowId === meta.windowId) ? 'no longer owns that tab' : 'has no open tab' };
+  if (guarded.has(pane.windowId)) return { refusal: 'has a protected tab (coordinator or dashboard)' };
+  return { pane };
 };
 
 const validTaskId = (id) => {
@@ -163,20 +140,21 @@ const validTaskId = (id) => {
   return id;
 };
 
-// The client names a task, never a pane: the pane comes from the ledger and must still be that
-// task's own pane, in its own window and session.
-const findTaskPane = (meta, panes, guarded) => {
+const findTaskPane = (meta, panes, guarded, scope) => {
   if (!meta) return { refusal: 'is not in the ledger' };
   if (!meta.paneId || !meta.windowId) return { refusal: 'has no pane on record' };
   if (guarded.has(meta.windowId)) return { refusal: 'has a protected tab (coordinator or dashboard)' };
-  const pane = panes.find((p) => p.id === meta.paneId && p.windowId === meta.windowId && p.session === meta.session);
-  return pane ? { pane } : { refusal: 'no longer owns a tab; it may be closed' };
+  const { pane, refusal } = ownTab(meta, panes, scope);
+  if (refusal) return { refusal };
+  if (!pane) return { refusal: 'no longer owns a tab; it may be closed' };
+  if (guarded.has(pane.windowId)) return { refusal: 'has a protected tab (coordinator or dashboard)' };
+  return { pane };
 };
 
-const resolveTaskPane = (stateDir, id) => {
+const resolveTaskPane = (scope, id) => {
   validTaskId(id);
   const panes = listPanes();
-  const { pane, refusal } = findTaskPane(readLedger(stateDir).find((m) => m.id === id), panes, protectedWindowIds(panes));
+  const { pane, refusal } = findTaskPane(readLedger(scope.stateDir).find((m) => m.id === id), panes, protectedWindowIds(panes), scope);
   if (refusal) throw new ActionError(`Task ${id} ${refusal}.`);
   return pane;
 };
@@ -198,40 +176,41 @@ const capturePeek = (pane) => {
   return { lines: kept.slice(-PEEK_LINES), command: pane.command };
 };
 
-const peekTask = async (stateDir, id) => capturePeek(resolveTaskPane(stateDir, id));
+const peekTask = async (scope, id) => capturePeek(resolveTaskPane(scope, id));
 
 const peekCoordinator = async (scope = {}) => capturePeek(resolveCoordinator(listPanes(), scope));
 
-const replyToTask = async (stateDir, id, text) => {
+const replyToTask = async (scope, id, text) => {
   const clean = sanitizeMessage(text);
-  await typeIntoAgent(resolveTaskPane(stateDir, id), clean, `${id} worker`);
+  await typeIntoAgent(resolveTaskPane(scope, id), clean, `${id} worker`);
   return { message: `Sent to ${id}.`, task: id, text: clean };
 };
 
-const replyableTaskIds = (stateDir, panes = listPanes()) => {
+const replyableTaskIds = (scope, panes = listPanes()) => {
   const guarded = protectedWindowIds(panes);
-  return new Set(readLedger(stateDir).filter((m) => m.id && findTaskPane(m, panes, guarded).pane).map((m) => m.id));
+  return new Set(readLedger(scope.stateDir).filter((m) => m.id && findTaskPane(m, panes, guarded, scope).pane).map((m) => m.id));
 };
 
-const closableTaskIds = (stateDir, panes = listPanes()) => {
+const closableTaskIds = (scope, panes = listPanes()) => {
   const guarded = protectedWindowIds(panes);
-  return new Set(readLedger(stateDir).filter((m) => m.id && !closeRefusal(m, panes, guarded)).map((m) => m.id));
+  return new Set(readLedger(scope.stateDir).filter((m) => m.id && closeTarget(m, panes, guarded, scope).pane).map((m) => m.id));
 };
 
-const closeTaskTab = async (stateDir, id) => {
+// The match is redone right before the kill, from a fresh pane list.
+const closeTaskTab = async (scope, id) => {
   validTaskId(id);
   const panes = listPanes();
-  const meta = readLedger(stateDir).find((m) => m.id === id);
-  const refusal = closeRefusal(meta, panes, protectedWindowIds(panes));
+  const meta = readLedger(scope.stateDir).find((m) => m.id === id);
+  const { pane, refusal } = closeTarget(meta, panes, protectedWindowIds(panes), scope);
   if (refusal) throw new ActionError(`Task ${id} ${refusal}; its tab was left open.`);
-  tmuxStrict(['kill-window', '-t', meta.windowId]);
+  tmuxStrict(['kill-window', '-t', pane.windowId]);
   return `Closed the tab of ${id}.`;
 };
 
-const closeAllDoneTabs = async (stateDir) => {
-  const ids = [...closableTaskIds(stateDir)];
+const closeAllDoneTabs = async (scope) => {
+  const ids = [...closableTaskIds(scope)];
   if (!ids.length) throw new ActionError('No done task has an open tab.');
-  const results = await Promise.allSettled(ids.map((id) => closeTaskTab(stateDir, id)));
+  const results = await Promise.allSettled(ids.map((id) => closeTaskTab(scope, id)));
   const failed = results.filter((r) => r.status === 'rejected').length;
   const closed = ids.length - failed;
   if (failed) throw new ActionError(`Closed ${closed} tab(s); ${failed} could not be closed.`);
@@ -245,6 +224,7 @@ module.exports = {
   PEEK_LINES,
   ROLE_OPTION,
   PROFILE_OPTION,
+  TASK_OPTION,
   tmux,
   listPanes,
   readLedger,

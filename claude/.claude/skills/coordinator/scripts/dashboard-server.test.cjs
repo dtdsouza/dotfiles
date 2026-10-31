@@ -24,6 +24,9 @@ const newWindow = (name, command) => {
   tmux('set-window-option', '-t', windowId, 'automatic-rename', 'off');
   return { windowId, paneId };
 };
+// What `agentctl.sh spawn` does to a worker's pane.
+const tagAsTask = (window, id, profile = 'twism') =>
+  tmux('set-option', '-p', '-t', window.paneId, actions.TASK_OPTION, id, ';', 'set-option', '-p', '-t', window.paneId, actions.PROFILE_OPTION, profile);
 const windowIds = () => tmux('list-windows', '-a', '-F', '#{window_id}').split('\n');
 
 const writeTask = (stateDir, meta) => {
@@ -72,6 +75,7 @@ before(async () => {
   const doneToo = newWindow('second-done', 'sleep 600');
   const reused = newWindow('someone-else', 'sleep 600');
 
+  for (const [window, id] of [[done, 'done-task'], [doneToo, 'second-done'], [working, 'working-task']]) tagAsTask(window, id);
   const stateDir = tmpDir('agentctl-state-');
   const archivedAt = '2026-10-17T11:00:00-03:00';
   writeTask(stateDir, { id: 'done-task', name: 'done-task', ...done, archivedAt });

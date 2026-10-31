@@ -241,3 +241,84 @@ describe('coordinators', () => {
     assert.match(r.stderr, /done\|blocked\|question\|progress/);
   });
 });
+
+describe('task tabs on a recycled window id', () => {
+  const twismTask = (id) => path.join(env.twismState, 'tasks', id);
+  const writeOld = (id, extra) => {
+    fs.mkdirSync(twismTask(id), { recursive: true });
+    fs.writeFileSync(
+      path.join(twismTask(id), 'meta.json'),
+      JSON.stringify({ id, name: `${id}-done`, model: 'sonnet', session: 'twism', workdir: env.twismRoot, createdAt: '2026-10-17T09:44:11-03:00', archivedAt: '2026-10-17T09:46:39-03:00', ...extra }),
+    );
+  };
+  const readMeta = (id) => JSON.parse(fs.readFileSync(path.join(twismTask(id), 'meta.json'), 'utf8'));
+  let live;
+
+  before(() => {
+    const r = agentctl(['spawn', '--name', 'live-probe', '--brief', env.brief, '--coordinator', 'c', '--cwd', env.twismRoot, '--session', 'twism']);
+    assert.equal(r.status, 0, r.stderr);
+    live = readMeta('live-probe');
+    writeOld('old-other-pane', { windowId: live.windowId, paneId: '%951' });
+    writeOld('old-same-ids', { windowId: live.windowId, paneId: live.paneId });
+  });
+
+  test('spawn tags the pane with its task and profile', () => {
+    assert.equal(paneOption(live.paneId, '@agentctl-task'), 'live-probe');
+    assert.equal(paneOption(live.paneId, '@agentctl-profile'), 'twism');
+    const personal = JSON.parse(fs.readFileSync(path.join(env.personalState, 'tasks', 'sandbox-probe', 'meta.json'), 'utf8'));
+    assert.equal(paneOption(personal.paneId, '@agentctl-task'), 'sandbox-probe');
+    assert.equal(paneOption(personal.paneId, '@agentctl-profile'), 'personal');
+  });
+
+  test('ls shows the old entries as closed and the live task on its window', () => {
+    const r = agentctl(['ls', '--all']);
+    assert.equal(r.status, 0, r.stderr);
+    const row = (id) => r.stdout.split('\n').find((l) => l.startsWith(`${id} `));
+    assert.match(row('live-probe'), new RegExp(`^live-probe\\s+${live.windowId}\\s`));
+    assert.match(row('old-other-pane'), /^old-other-pane\s+-\s+archived\s+old-other-pane-done\s/);
+    assert.match(row('old-same-ids'), /^old-same-ids\s+-\s+archived\s+old-same-ids-done\s/);
+  });
+
+  test('rename by an old id refuses and leaves the live window alone', () => {
+    const r = agentctl(['rename', 'old-same-ids', 'hijacked']);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /no open tab of its own/);
+    assert.equal(tmux('display-message', '-p', '-t', live.windowId, '#{window_name}'), 'live-probe');
+  });
+
+  test('rename by window id records the name only on the task that owns the window', () => {
+    const r = agentctl(['rename', live.windowId, 'live-probe-review']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readMeta('live-probe').name, 'live-probe-review');
+    assert.equal(readMeta('old-other-pane').name, 'old-other-pane-done');
+    assert.equal(readMeta('old-same-ids').name, 'old-same-ids-done');
+  });
+
+  test('done on an old id archives nothing new and renames no window', () => {
+    const r = agentctl(['done', 'old-other-pane']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(tmux('display-message', '-p', '-t', live.windowId, '#{window_name}'), 'live-probe-review');
+  });
+
+  test('resume refuses a task whose own tab is still open, but not an old entry on its window id', () => {
+    const r = agentctl(['resume', 'live-probe']);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /still has its tab open/);
+    const brief = agentctl(['brief']);
+    assert.match(brief.stdout, /### live-probe\ntab `live-probe-review` \(@\d+\) \| (starting|running|setting-up)/);
+  });
+
+  test('adopt-tabs tags an untagged legacy tab that started at spawn time', () => {
+    const pane = tmux('new-window', '-d', '-P', '-F', '#{window_id} #{pane_id}', '-t', 'twism:', '-n', 'legacy-probe', 'sleep 600').split(' ');
+    fs.mkdirSync(twismTask('legacy-probe'), { recursive: true });
+    fs.writeFileSync(
+      path.join(twismTask('legacy-probe'), 'meta.json'),
+      JSON.stringify({ id: 'legacy-probe', name: 'legacy-probe', model: 'sonnet', session: '0', workdir: env.twismRoot, createdAt: new Date().toISOString(), windowId: pane[0], paneId: pane[1] }),
+    );
+    const r = agentctl(['adopt-tabs']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`twism: tagged \\${pane[1]} \\(twism:${pane[0]}\\) as legacy-probe`));
+    assert.doesNotMatch(r.stdout, /old-/);
+    assert.equal(paneOption(pane[1], '@agentctl-task'), 'legacy-probe');
+  });
+});

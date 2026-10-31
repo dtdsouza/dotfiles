@@ -133,6 +133,10 @@ describe('up with the Twism coordinator in session 0', () => {
     const taskDir = path.join(world.twismState, 'tasks', 'lost-tab');
     fs.mkdirSync(taskDir, { recursive: true });
     fs.writeFileSync(path.join(taskDir, 'meta.json'), JSON.stringify({ id: 'lost-tab', name: 'lost-tab', windowId: '@99', paneId: '%99', session: '0', workdir: world.root, createdAt: '2026-10-30T10:00:00-03:00' }));
+    const [recycledWindow, recycledPane] = world.tmux('display-message', '-p', '-t', '=0:some-work', '#{window_id} #{pane_id}').split(' ');
+    const recycledDir = path.join(world.twismState, 'tasks', 'recycled-tab');
+    fs.mkdirSync(recycledDir, { recursive: true });
+    fs.writeFileSync(path.join(recycledDir, 'meta.json'), JSON.stringify({ id: 'recycled-tab', name: 'recycled-tab', windowId: recycledWindow, paneId: recycledPane, session: '0', workdir: world.root, createdAt: '2026-10-17T10:00:00-03:00' }));
 
     const r = world.up();
     assert.equal(r.status, 0, r.stderr + r.stdout);
@@ -144,6 +148,7 @@ describe('up with the Twism coordinator in session 0', () => {
     assert.equal(world.tmux('display-message', '-p', '-t', '=0:dashboard', '#{session_name}'), '0');
     assert.match(r.stdout, /twism: coordinator already running in session 0/);
     assert.match(r.stdout, /lost-tab: bash \S+agentctl\.sh resume lost-tab/);
+    assert.match(r.stdout, /recycled-tab: bash \S+agentctl\.sh resume recycled-tab/);
     assert.match(r.stdout, /attach: tmux attach -t =0/);
     assert.ok(!world.tmux('list-sessions', '-F', '#{session_name}').includes('resume-lost-tab'));
   });

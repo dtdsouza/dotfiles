@@ -3,7 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { faviconLink } = require('./favicon.cjs');
-const { tmux } = require('./dashboard-actions.cjs');
+const { tmux } = require('./tmux.cjs');
+const { ADOPT_HINT, listPanes, matchTaskTabs, sessionProfilesOf } = require('./task-tabs.cjs');
 const ui = require('./dashboard-actions-ui.cjs');
 const { filesCss } = require('./dashboard-files-ui.cjs');
 const { spriteKind, spriteHtml, spriteDefsHtml, spriteCss } = require('./dashboard-sprites.cjs');
@@ -64,15 +65,6 @@ const parseNotes = (text) =>
     return [...rest.reverse(), [last[0], `${last[1]}\n${line}`]];
   }, []);
 
-const readWindows = () =>
-  new Map(
-    tmux(['list-windows', '-a', '-F', '#{window_id}|#{session_name}|#{pane_id}|#{window_activity}|#{window_name}'])
-      .split('\n')
-      .filter(Boolean)
-      .map((l) => l.split('|'))
-      .map(([id, session, pane, activity, ...name]) => [id, { session, pane, name: name.join('|'), activity: Number(activity) }]),
-  );
-
 const captureSnapshot = (pane) =>
   tmux(['capture-pane', '-p', '-t', pane])
     .split('\n')
@@ -88,27 +80,28 @@ const ago = (epochSeconds) => {
   return `${Math.floor(s / 86400)}d`;
 };
 
-const buildItem = ({ meta, phase, notes, goal }, win) => {
-  const suffix = win && win.name.match(/-(review|blocked|done)$/);
-  const tabClosed = !win;
+const buildItem = ({ meta, phase, notes, goal }, tab) => {
+  const suffix = tab && tab.windowName.match(/-(review|blocked|done)$/);
+  const tabClosed = !tab;
   const status = tabClosed ? 'done' : suffix ? SUFFIX_STATUS[suffix[1]] : 'working';
-  const snapshot = win ? captureSnapshot(win.pane) : [];
+  const snapshot = tab ? captureSnapshot(tab.id) : [];
   const ctx = snapshot.map((l) => l.match(/ctx:(\d+)%/)).filter(Boolean).pop();
   const lastNote = notes.length ? notes[notes.length - 1][1] : '';
   const flags = [
-    meta.archivedAt && win ? 'archived in the ledger, tab still open' : '',
+    meta.archivedAt && tab ? 'archived in the ledger, tab still open' : '',
     tabClosed && !meta.archivedAt ? 'tab closed but the task is not archived in the ledger' : '',
+    tab && tab.legacy ? `tab predates task tags; ${ADOPT_HINT}` : '',
     ['exited', 'setup-failed'].includes(phase) ? `phase: ${phase}` : '',
   ].filter(Boolean);
   return {
     id: meta.id,
     key: meta.id,
     profile: PRIMARY_PROFILE,
-    tab: win ? win.name : meta.name,
+    tab: tab ? tab.windowName : meta.name,
     status,
-    win: win ? meta.windowId : '-',
-    pane: win ? win.pane : '-',
-    session: win ? win.session : meta.session,
+    win: tab ? tab.windowId : '-',
+    pane: tab ? tab.id : '-',
+    session: tab ? tab.session : meta.session,
     model: meta.model,
     effort: meta.effort || '-',
     ctx: ctx ? ctx[1] : '',
@@ -116,9 +109,9 @@ const buildItem = ({ meta, phase, notes, goal }, win) => {
     where: (meta.workdir || '').replace(process.env.HOME || '\0', '~'),
     since: (meta.createdAt || '').slice(0, 16).replace('T', ' '),
     phase,
-    activity: win ? ago(win.activity) : '',
-    updated: win ? win.activity : Math.floor(Date.parse(meta.archivedAt || meta.createdAt) / 1000) || 0,
-    closedAgo: !win && meta.archivedAt ? ago(Math.floor(Date.parse(meta.archivedAt) / 1000)) : '',
+    activity: tab ? ago(tab.activity) : '',
+    updated: tab ? tab.activity : Math.floor(Date.parse(meta.archivedAt || meta.createdAt) / 1000) || 0,
+    closedAgo: !tab && meta.archivedAt ? ago(Math.floor(Date.parse(meta.archivedAt) / 1000)) : '',
     summary: lastNote,
     goal,
     notes,
@@ -129,16 +122,22 @@ const buildItem = ({ meta, phase, notes, goal }, win) => {
 
 const isRecent = (iso) => Date.now() - Date.parse(iso) < ARCHIVE_WINDOW_DAYS * 86400 * 1000;
 
-const collectItems = (stateDir) => {
-  const windows = readWindows();
-  return readTasks(path.join(stateDir, 'tasks'))
-    .filter((t) => t.meta.id && (!t.meta.archivedAt || windows.has(t.meta.windowId) || isRecent(t.meta.archivedAt)))
-    .map((t) => buildItem(t, windows.get(t.meta.windowId)))
+// scope = { profile, sessionProfiles, panes }: a task only shows a tab its profile's pane owns.
+const collectItems = (stateDir, { profile = PRIMARY_PROFILE, sessionProfiles = new Map(), panes = listPanes() } = {}) => {
+  const tasks = readTasks(path.join(stateDir, 'tasks'));
+  const tabs = matchTaskTabs(tasks.map((t) => t.meta), panes, { profile, sessionProfiles });
+  return tasks
+    .filter((t) => t.meta.id && (!t.meta.archivedAt || tabs.has(t.meta.id) || isRecent(t.meta.archivedAt)))
+    .map((t) => buildItem(t, tabs.get(t.meta.id)))
     .sort((a, b) => b.updated - a.updated);
 };
 
-const collectProfileItems = (profiles) =>
-  profiles.flatMap((p) => collectItems(p.stateDir).map((a) => ({ ...a, profile: p.name, key: taskKey(p.name, a.id) })));
+const collectProfileItems = (profiles, panes = listPanes()) => {
+  const sessionProfiles = sessionProfilesOf(profiles);
+  return profiles.flatMap((p) =>
+    collectItems(p.stateDir, { profile: p.name, sessionProfiles, panes }).map((a) => ({ ...a, profile: p.name, key: taskKey(p.name, a.id) })),
+  );
+};
 
 const css = `:root{color-scheme:dark;--bg:#000516;--surface:#0c1121;--fg:#fff;--text:rgba(255,255,255,.7);--muted:rgba(255,255,255,.55);--line:rgba(255,255,255,.1);--soft:rgba(255,255,255,.05);--edge:rgba(255,255,255,.25);
 --green:#baf764;--green-ink:#baf764;--green-30:rgba(186,247,100,.3);--green-12:rgba(186,247,100,.12);--blue-glow:#4a74ff;--amber:#ffc65c;--red:#ff6b6b;--red-45:rgba(255,107,107,.45);--stripe:rgba(255,107,107,.07);

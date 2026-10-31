@@ -89,6 +89,7 @@ Usage:
   agentctl.sh dashboard --serve             serve the page with actions on 127.0.0.1 (and keep the file fresh)
   agentctl.sh dashboard --url [--tailnet]   print the keyed URL that opens the served page (--tailnet: the phone's https URL)
   agentctl.sh resume <id>                   new tmux session in the task's workdir running `claude --resume <id>`
+  agentctl.sh adopt-tabs [--dry-run]        one-time: tag every profile's tabs spawned before task tags existed
   agentctl.sh install-jump-handler          register tmuxjump:// links (the page's "Open in terminal" button)
   agentctl.sh up [--no-attach]              after a reboot: per profile, create its tmux session and start its
                                             coordinator if missing, serve the dashboard if nothing does, list
@@ -167,8 +168,30 @@ name_window() {
 window_exists() { tmux list-windows -a -F '#{window_id}' 2>/dev/null | grep -qxF -- "$1"; }
 pane_exists() { tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qxF -- "$1"; }
 
-window_name_or() {
-  if window_exists "$1"; then tmux display-message -p -t "$1" '#{window_name}'; else printf '%s' "$2"; fi
+# A task's own tab is the pane tagged with its id and profile (or a legacy pane whose ids, session and
+# start time fit its ledger entry); window ids alone recycle with every tmux server.
+declare -A TAB_WINDOW=() TAB_PANE=() TAB_SESSION=() TAB_NAME=()
+load_tabs() {
+  local id window pane session legacy name
+  TAB_WINDOW=() TAB_PANE=() TAB_SESSION=() TAB_NAME=()
+  while IFS='|' read -r id window pane session legacy name; do
+    [[ -n $id ]] || continue
+    TAB_WINDOW[$id]="$window" TAB_PANE[$id]="$pane" TAB_SESSION[$id]="$session" TAB_NAME[$id]="$name"
+  done < <(node "$(dirname "$SCRIPT_PATH")/task-tabs.cjs" tabs "$STATE_DIR" "$PROFILE" "$PRIMARY_STATE_DIR" "$PROFILE_SESSION" 2>/dev/null)
+}
+
+task_owning_window() {
+  local id
+  for id in "${!TAB_WINDOW[@]}"; do
+    if [[ ${TAB_WINDOW[$id]} == "$1" ]]; then
+      printf '%s' "$id"
+      return 0
+    fi
+  done
+}
+
+tag_task_pane() {
+  tmux set-option -p -t "$1" @agentctl-task "$2" \; set-option -p -t "$1" @agentctl-profile "$PROFILE"
 }
 
 caller_session() {
@@ -294,6 +317,7 @@ cmd_spawn() {
     "bash $(printf %q "$SCRIPT_PATH") _run $(printf %q "$id")")"
   window_id="${created% *}"
   pane_id="${created#* }"
+  tag_task_pane "$pane_id" "$id"
   name_window "$window_id" "$name"
   update_meta "$task_dir" --arg w "$window_id" --arg p "$pane_id" '.windowId=$w | .paneId=$p'
   refresh_dashboard
@@ -374,20 +398,10 @@ cmd_run() {
   exec "${SHELL:-bash}" -i
 }
 
-find_task_by_window() {
-  local window_id="$1" meta
-  for meta in "$TASKS_DIR"/*/meta.json; do
-    [[ -e $meta ]] || continue
-    if [[ $(jq -r '.windowId // ""' "$meta") == "$window_id" ]]; then
-      dirname "$meta"
-      return 0
-    fi
-  done
-}
-
 cmd_rename() {
   (($# == 2)) || die "usage: rename <id|@window|%pane> <new-name>"
-  local target="$1" name="$2" window_id task_dir=""
+  local target="$1" name="$2" window_id id=""
+  load_tabs
   case "$target" in
     @*) window_id="$target" ;;
     %*)
@@ -395,25 +409,26 @@ cmd_rename() {
       window_id="$(tmux display-message -p -t "$target" '#{window_id}')"
       ;;
     *)
-      task_dir="$TASKS_DIR/$target"
-      [[ -f $task_dir/meta.json ]] || die "no task '$target' in $TASKS_DIR"
-      window_id="$(jq -r '.windowId // ""' "$task_dir/meta.json")"
-      [[ -n $window_id ]] || die "task '$target' has no window id"
+      require_task "$target" >/dev/null
+      id="$target"
+      window_id="${TAB_WINDOW[$id]:-}"
+      [[ -n $window_id ]] || die "task '$id' has no open tab of its own; nothing renamed"
       ;;
   esac
   window_exists "$window_id" || die "window $window_id no longer exists"
   name_window "$window_id" "$name"
-  task_dir="${task_dir:-$(find_task_by_window "$window_id")}"
-  if [[ -n $task_dir ]]; then
-    update_meta "$task_dir" --arg n "$name" '.name=$n'
+  id="${id:-$(task_owning_window "$window_id")}"
+  if [[ -n $id ]]; then
+    update_meta "$TASKS_DIR/$id" --arg n "$name" '.name=$n'
   fi
   refresh_dashboard
   echo "renamed $window_id -> '$name'"
 }
 
+# Reads TAB_PANE, so callers run load_tabs first.
 task_state() {
-  local task_dir="$1" pane_id="$2"
-  if ! pane_exists "$pane_id"; then
+  local task_dir="$1" id="$2"
+  if [[ -z ${TAB_PANE[$id]:-} ]]; then
     echo "closed"
     return
   fi
@@ -452,15 +467,15 @@ cmd_ls() {
   local include_archived=false
   if [[ ${1:-} == --all ]]; then include_archived=true; fi
   local format='%-30s %-6s %-13s %-34s %-7s %s\n' task_dir state
-  local id name model effort mode branch workdir created window_id pane_id tab
+  local id name model effort mode branch workdir created window_id pane_id
+  load_tabs
   printf "$format" ID WINDOW STATE TAB MODEL WORKDIR
   while IFS= read -r task_dir; do
     IFS=$'\x1f' read -r id name model effort mode branch workdir created window_id pane_id \
       < <(read_task_fields "$task_dir")
-    tab="$(window_name_or "$window_id" "$name")"
-    state="$(task_state "$task_dir" "$pane_id")"
+    state="$(task_state "$task_dir" "$id")"
     if is_archived "$task_dir"; then state="archived"; fi
-    printf "$format" "$id" "$window_id" "$state" "$tab" "$model" "${workdir/#$HOME/~}"
+    printf "$format" "$id" "${TAB_WINDOW[$id]:--}" "$state" "${TAB_NAME[$id]:-$name}" "$model" "${workdir/#$HOME/~}"
   done < <(task_dirs "$include_archived")
 }
 
@@ -481,15 +496,15 @@ cmd_note() {
 
 cmd_done() {
   (($# >= 1)) || die 'usage: done <id> ["<summary>"]'
-  local id="$1" task_dir window_id name
+  local id="$1" task_dir name
   task_dir="$(require_task "$id")"
   shift
   if (($#)); then printf -- '- %s done: %s\n' "$(stamp)" "$*" >>"$task_dir/notes.md"; fi
   update_meta "$task_dir" --arg at "$(date -Iseconds)" '.archivedAt=$at'
-  window_id="$(jq -r '.windowId // ""' "$task_dir/meta.json")"
-  if [[ -n $window_id ]] && window_exists "$window_id"; then
-    name="$(tmux display-message -p -t "$window_id" '#{window_name}' | sed -E 's/-(blocked|review|done)$//')"
-    cmd_rename "$window_id" "$name-done"
+  load_tabs
+  if [[ -n ${TAB_WINDOW[$id]:-} ]]; then
+    name="$(sed -E 's/-(blocked|review|done)$//' <<<"${TAB_NAME[$id]}")"
+    cmd_rename "$id" "$name-done"
   fi
   refresh_dashboard
   echo "archived $id"
@@ -564,6 +579,10 @@ cmd_resume() {
   export PATH="$HOME/.local/bin:$PATH"
   task_dir="$(require_task "$id")"
   [[ $(jq -r '.harness // "claude"' "$task_dir/meta.json") == claude ]] || die "resume only handles Claude tasks for now; run \`codex resume\` in the task's workdir"
+  load_tabs
+  if [[ -n ${TAB_WINDOW[$id]:-} ]]; then
+    die "task '$id' still has its tab open (${TAB_SESSION[$id]}:${TAB_WINDOW[$id]}); switch to it instead of resuming"
+  fi
   workdir="$(jq -r '.workdir // ""' "$task_dir/meta.json")"
   if [[ ! -d $workdir ]]; then
     echo "agentctl: workdir of '$id' is gone ($workdir); its session can't be resumed from here" >&2
@@ -571,6 +590,13 @@ cmd_resume() {
     exit 1
   fi
   exec tmux new-session -A -s "resume-$id" -c "$workdir" "claude --resume $(printf %q "$id")"
+}
+
+cmd_adopt_tabs() {
+  [[ $PROFILE == "$PRIMARY_PROFILE" ]] || die "adopt-tabs covers every profile; run it without --profile"
+  [[ -z ${1:-} || $1 == --dry-run ]] || die "usage: adopt-tabs [--dry-run]"
+  node "$(dirname "$SCRIPT_PATH")/task-tabs.cjs" adopt "$PRIMARY_STATE_DIR" ${1:+"$1"}
+  [[ -n ${1:-} ]] || refresh_dashboard
 }
 
 cmd_install_jump_handler() {
@@ -592,15 +618,15 @@ DESKTOP
   echo "registered tmuxjump:// -> $jump_script"
 }
 
+# Reads TAB_*, so callers run load_tabs first.
 render_task() {
   local task_dir="$1" notes="$1/notes.md" total
-  local id name model effort mode branch workdir created window_id pane_id tab
+  local id name model effort mode branch workdir created window_id pane_id
   IFS=$'\x1f' read -r id name model effort mode branch workdir created window_id pane_id \
     < <(read_task_fields "$task_dir")
-  tab="$(window_name_or "$window_id" "$name")"
   echo
   echo "### $id"
-  echo "tab \`$tab\` ($window_id) | $(task_state "$task_dir" "$pane_id") | $model${effort:+/$effort} | ${branch:-${workdir/#$HOME/~}} | since ${created%%T*}"
+  echo "tab \`${TAB_NAME[$id]:-$name}\` (${TAB_WINDOW[$id]:--}) | $(task_state "$task_dir" "$id") | $model${effort:+/$effort} | ${branch:-${workdir/#$HOME/~}} | since ${created%%T*}"
   if [[ ! -s $notes ]]; then
     echo "(no notes yet)"
     return
@@ -616,6 +642,7 @@ render_brief() {
   local source="$1" task_dir
   local task_list=()
   mapfile -t task_list < <(task_dirs false)
+  load_tabs
   echo "# Coordinator ledger (profile $PROFILE, loaded on $source, $(stamp))"
   echo
   echo "This is your state; the conversation may have been cleared or compacted. Keep it current with \`$(self_command)\`: \`note <id> \"...\"\` for every worker report and user decision, \`note --standing \"...\"\` for instructions that span tasks, \`done <id>\` once a task is finished."
@@ -756,13 +783,13 @@ passthrough_env_args() {
   done
 }
 
+# Reads TAB_*, so callers run load_tabs first.
 list_lost_tabs() {
-  local task_dir id pane_id harness
+  local task_dir id harness
   while IFS= read -r task_dir; do
     id="$(jq -r '.id' "$task_dir/meta.json")"
-    pane_id="$(jq -r '.paneId // ""' "$task_dir/meta.json")"
     harness="$(jq -r '.harness // "claude"' "$task_dir/meta.json")"
-    [[ -n $pane_id ]] && pane_exists "$pane_id" && continue
+    [[ -n ${TAB_WINDOW[$id]:-} ]] && continue
     if [[ $harness == claude ]]; then
       echo "  $id: $(self_command) resume $id"
     else
@@ -773,8 +800,9 @@ list_lost_tabs() {
 
 # One profile's part of `up`; prints `session=<name>` last so the caller knows where it lives.
 cmd_up_profile() {
-  local pane session env_args=() lost
+  local pane session env_args=() lost id
   mapfile -t env_args < <(passthrough_env_args)
+  load_tabs
   pane="$(find_coordinator_pane)"
   if [[ -n $pane ]]; then
     session="$(tmux display-message -p -t "$pane" '#{session_name}')"
@@ -783,7 +811,13 @@ cmd_up_profile() {
     session="$PROFILE_SESSION"
     if [[ -z $session && $PROFILE == "$PRIMARY_PROFILE" ]]; then
       # Twism tabs may live in a session with another name (`0`); reuse it rather than adding one.
-      session="$(task_dirs false | while IFS= read -r d; do p="$(jq -r '.paneId // ""' "$d/meta.json")"; [[ -n $p ]] && pane_exists "$p" && tmux display-message -p -t "$p" '#{session_name}' && break; done)"
+      while IFS= read -r id; do
+        id="$(basename "$id")"
+        if [[ -n ${TAB_SESSION[$id]:-} ]]; then
+          session="${TAB_SESSION[$id]}"
+          break
+        fi
+      done < <(task_dirs false)
     fi
     session="${session:-$PROFILE}"
     local command="bash $(printf %q "$SCRIPT_PATH") --profile $PROFILE coordinator"
@@ -852,6 +886,7 @@ main() {
     brief) cmd_brief "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
     resume) cmd_resume "$@" ;;
+    adopt-tabs) cmd_adopt_tabs "$@" ;;
     install-jump-handler) cmd_install_jump_handler ;;
     up) cmd_up "$@" ;;
     _up_profile) cmd_up_profile ;;

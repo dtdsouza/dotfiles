@@ -28,6 +28,9 @@ const newWindow = (name, command) => {
   return { windowId, paneId };
 };
 
+// What `agentctl.sh spawn` does to a worker's pane.
+const tagAsTask = (window, id, profile = 'twism') =>
+  tmux('set-option', '-p', '-t', window.paneId, actions.TASK_OPTION, id, ';', 'set-option', '-p', '-t', window.paneId, actions.PROFILE_OPTION, profile);
 const writeTask = (stateDir, meta) => {
   const dir = path.join(stateDir, 'tasks', meta.id);
   fs.mkdirSync(dir, { recursive: true });
@@ -93,6 +96,7 @@ before(async () => {
   const asking = newWindow('asking-task-review', `${dialog}; exec ${fakeClaude} -a ${typedDialog} >/dev/null`);
   const shell = newWindow('shell-task', `printf '%s\\n' '${rule}' '❯ ' '${rule}'; exec sleep 600`);
 
+  for (const [window, id] of [[ready, 'ready-task'], [asking, 'asking-task'], [shell, 'shell-task']]) tagAsTask(window, id);
   const stateDir = tmpDir('agentctl-remote-state-');
   writeTask(stateDir, { id: 'ready-task', name: 'ready-task', ...ready });
   writeTask(stateDir, { id: 'asking-task', name: 'asking-task', ...asking });

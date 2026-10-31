@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { DEFAULT_PORT, css, collectProfileItems, render, writePage } = require('./dashboard.cjs');
 const actions = require('./dashboard-actions.cjs');
 const { PRIMARY_PROFILE, loadProfiles, taskKey, parseTaskKey } = require('./profiles.cjs');
+const { sessionProfilesOf } = require('./task-tabs.cjs');
 const { classifyRequest, loadTailnetConfig } = require('./dashboard-tailnet.cjs');
 const { loadFilePolicy } = require('./dashboard-files-policy.cjs');
 const { createArtifactIndex } = require('./dashboard-files-index.cjs');
@@ -149,6 +150,8 @@ const taskOf = (context, key) => {
   return { profile: profileOf(context, profile), id };
 };
 
+const taskScope = (context, profile) => ({ stateDir: profile.stateDir, profile: profile.name, sessionProfiles: sessionProfilesOf(context.profiles) });
+
 const withProfile = (profile, result) => (result && typeof result === 'object' ? { ...result, profile: profile.name } : result);
 
 const ROUTES = {
@@ -158,14 +161,14 @@ const ROUTES = {
   },
   '/api/reply': (context, body) => {
     const { profile, id } = taskOf(context, body.id);
-    return actions.replyToTask(profile.stateDir, id, body.text).then((r) => withProfile(profile, r));
+    return actions.replyToTask(taskScope(context, profile), id, body.text).then((r) => withProfile(profile, r));
   },
   '/api/coordinator/focus': (context, body) => actions.focusCoordinator(coordinatorScope(context, profileOf(context, body.profile))),
   '/api/tabs/close': (context, body) => {
     const { profile, id } = taskOf(context, body.id);
-    return actions.closeTaskTab(profile.stateDir, id);
+    return actions.closeTaskTab(taskScope(context, profile), id);
   },
-  '/api/tabs/close-done': (context, body) => actions.closeAllDoneTabs(profileOf(context, body.profile).stateDir),
+  '/api/tabs/close-done': (context, body) => actions.closeAllDoneTabs(taskScope(context, profileOf(context, body.profile))),
 };
 
 // Typed text reaches a terminal, so whatever an action reports as typed is kept in a private log.
@@ -261,7 +264,7 @@ const handlePage = (req, res, context) => {
   if (context.url.pathname === '/api/peek') {
     return handlePeek(req, res, context, async () => {
       const { profile, id } = taskOf(context, context.url.searchParams.get('id'));
-      return actions.peekTask(profile.stateDir, id);
+      return actions.peekTask(taskScope(context, profile), id);
     });
   }
   if (context.url.pathname === '/api/coordinator/peek') {
@@ -277,7 +280,7 @@ const handlePage = (req, res, context) => {
   if (!safeEqual(readCookie(req.headers.cookie, COOKIE), context.key)) return send(res, 401, LOCKED_PAGE);
   const nonce = crypto.randomBytes(16).toString('base64');
   const panes = actions.listPanes();
-  const keysOf = (pick) => new Set(context.profiles.flatMap((p) => [...pick(p.stateDir, panes)].map((id) => taskKey(p.name, id))));
+  const keysOf = (pick) => new Set(context.profiles.flatMap((p) => [...pick(taskScope(context, p), panes)].map((id) => taskKey(p.name, id))));
   const served = {
     csrf: context.csrf,
     nonce,

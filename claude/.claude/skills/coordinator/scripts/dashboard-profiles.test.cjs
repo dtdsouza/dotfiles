@@ -34,6 +34,9 @@ const newWindow = (session, name, command) => {
   return { windowId, paneId };
 };
 
+// What `agentctl.sh spawn` does to a worker's pane.
+const tagAsTask = (window, id, profile = 'twism') =>
+  tmux('set-option', '-p', '-t', window.paneId, actions.TASK_OPTION, id, ';', 'set-option', '-p', '-t', window.paneId, actions.PROFILE_OPTION, profile);
 const writeTask = (stateDir, meta) => {
   const dir = path.join(stateDir, 'tasks', meta.id);
   fs.mkdirSync(dir, { recursive: true });
@@ -81,6 +84,8 @@ before(async () => {
   const worker = newWindow('personal', 'mimic-bug', `${CODEX_PROMPT}; exec ${scratch}/codex -a ${typed.worker} >/dev/null`);
   const busy = newWindow('personal', 'busy-worker', `${CODEX_DIALOG}; exec ${scratch}/codex -a ${typed.busy} >/dev/null`);
 
+  tagAsTask(worker, 'mimic-bug', 'personal');
+  tagAsTask(busy, 'busy-worker', 'personal');
   const twismState = tmpDir('agentctl-twism-');
   const personalState = tmpDir('agentctl-personal-');
   writeTask(personalState, { id: 'mimic-bug', name: 'mimic-bug', session: 'personal', model: 'gpt-6-sol', harness: 'codex', profile: 'personal', ...worker });
