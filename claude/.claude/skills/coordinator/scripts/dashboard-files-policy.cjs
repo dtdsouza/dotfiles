@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { PRIMARY_PROFILE } = require('./profiles.cjs');
 
 const ROOTS_ENV = 'COORDINATOR_DASHBOARD_FILE_ROOTS';
 const DEFAULT_ROOTS = ['~/workspace/twism/**/.claude/tmp/**', '~/workspace/twism/**/.claude/worktrees/*/{.claude/tmp,docs,openspec}/**'];
@@ -73,15 +74,22 @@ const parseRoots = (text, home = os.homedir()) =>
     .map((p) => compileRoot(p, home))
     .filter(Boolean);
 
-// null turns the viewer off.
+// null turns the viewer off. `roots` decides what is served; `scopes` decides which profile a file
+// belongs to: the primary gets the explicit global roots or the defaults, every other profile
+// exactly its own AGENTCTL_FILE_ROOTS. An explicit global setting stays authoritative for serving,
+// including `off`; profile roots only add to the defaults.
 const loadFilePolicy = (env = process.env, home = os.homedir(), profiles = []) => {
   const configured = (env[ROOTS_ENV] || '').trim();
   if (configured === 'off') return null;
-  // An explicit global setting remains authoritative, including `off`. Profiles only augment
-  // the defaults, so a Personal setting cannot replace another profile's configured policy.
-  const defaults = [...DEFAULT_ROOTS, ...profiles.map((p) => p.fileRoots).filter(Boolean)];
+  const primary = profiles.find((p) => p.name === PRIMARY_PROFILE) || {};
+  const others = profiles.filter((p) => p.name !== PRIMARY_PROFILE && p.fileRoots);
+  const defaults = [...DEFAULT_ROOTS, primary.fileRoots, ...others.map((p) => p.fileRoots)].filter(Boolean);
   const roots = parseRoots(configured || defaults.join(':'), home);
-  return roots.length ? { roots } : null;
+  const scopes = [
+    { name: PRIMARY_PROFILE, roots: parseRoots(configured || [...DEFAULT_ROOTS, primary.fileRoots].filter(Boolean).join(':'), home) },
+    ...others.map((p) => ({ name: p.name, roots: parseRoots(p.fileRoots, home) })),
+  ];
+  return roots.length ? { roots, scopes } : null;
 };
 
 // Wildcards never match a denied name, so `**` cannot walk into `.git/` or `node_modules/`; only a
@@ -120,6 +128,21 @@ const matchRoots = (real, roots) => {
   return null;
 };
 
+// A non-primary profile's own roots are the more specific claim, so they win over the primary's
+// (an explicit global root may cover both); two such profiles matching one file is ambiguous.
+const fileProfileOf = (file, policy) => {
+  if (!policy) return '';
+  const real = realpathOr(file);
+  const scopes = policy.scopes || [{ name: PRIMARY_PROFILE, roots: policy.roots }];
+  const others = scopes.filter((s) => s.name !== PRIMARY_PROFILE && matchRoots(real, s.roots));
+  if (others.length) return others.length === 1 ? others[0].name : '';
+  const primary = scopes.find((s) => s.name === PRIMARY_PROFILE);
+  return primary && matchRoots(real, primary.roots) ? PRIMARY_PROFILE : '';
+};
+
+// The same serving policy, narrowed to the files one profile's notes may resolve.
+const scopePolicy = (policy, profile) => (policy ? { ...policy, profile } : policy);
+
 const refuse = (status, reason) => ({ refusal: [status, reason] });
 
 const validRequestPath = (requested) => {
@@ -146,6 +169,7 @@ const resolveViewable = (requested, policy) => {
   if (!fileType) return refuse(403, 'This file is not viewable.');
   const match = matchRoots(real, policy.roots);
   if (!match) return refuse(403, 'This file is outside the viewable folders.');
+  if (policy.profile && fileProfileOf(real, policy) !== policy.profile) return refuse(403, "This file belongs to another profile's folders.");
   let stat;
   try {
     stat = fs.statSync(real);
@@ -156,4 +180,4 @@ const resolveViewable = (requested, policy) => {
   return { real, ...fileType, size: stat.size, mtimeMs: stat.mtimeMs, artifactDir: match.artifactDir };
 };
 
-module.exports = { ROOTS_ENV, DEFAULT_ROOTS, isDeniedName, isGlob, segmentRegex, loadFilePolicy, resolveViewable };
+module.exports = { ROOTS_ENV, DEFAULT_ROOTS, isDeniedName, isGlob, segmentRegex, loadFilePolicy, fileProfileOf, scopePolicy, resolveViewable };

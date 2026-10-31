@@ -13,7 +13,7 @@ const { classifyRequest, loadTailnetConfig } = require('./dashboard-tailnet.cjs'
 const { loadFilePolicy } = require('./dashboard-files-policy.cjs');
 const { createArtifactIndex } = require('./dashboard-files-index.cjs');
 const { VIEW_PREFIX, createSigner, handleView } = require('./dashboard-files-serve.cjs');
-const { createProfileAttribution, decorateItems, filesPageHtml } = require('./dashboard-files-ui.cjs');
+const { decorateItems, filesPageHtml } = require('./dashboard-files-ui.cjs');
 
 const HOST = '127.0.0.1';
 const COOKIE = 'agentctl_dashboard';
@@ -286,21 +286,10 @@ const handlePage = (req, res, context) => {
     remote: context.via === 'tailnet',
     files: Boolean(context.files),
   };
-  const attribute = context.files ? createProfileAttribution(context.profiles, context.files.policy) : null;
   const allItems = collectProfileItems(context.profiles);
   const items = context.profiles.flatMap((profile) => {
     const own = allItems.filter((item) => item.profile === profile.name);
-    if (!context.files) return own;
-    return decorateItems(own, {
-      stateDir: profile.stateDir,
-      ...context.files,
-      attribute: (file) => {
-        const key = attribute(file);
-        if (!key) return '';
-        const owner = parseTaskKey(key);
-        return owner.profile === profile.name ? owner.id : '';
-      },
-    });
+    return context.files ? decorateItems(own, { stateDir: profile.stateDir, ...context.files, profile: profile.name }) : own;
   });
   const html = render(items, { served, profiles: context.profiles });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });

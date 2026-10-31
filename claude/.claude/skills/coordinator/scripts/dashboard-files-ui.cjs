@@ -5,7 +5,8 @@ const path = require('path');
 const { readLedger } = require('./dashboard-actions.cjs');
 const { findNoteRefs, resolveCandidate, collectMentions, createAttribution } = require('./dashboard-files-index.cjs');
 const { viewHref } = require('./dashboard-files-serve.cjs');
-const { taskKey } = require('./profiles.cjs');
+const { fileProfileOf, scopePolicy } = require('./dashboard-files-policy.cjs');
+const { PRIMARY_PROFILE, taskKey } = require('./profiles.cjs');
 
 const FILES_PAGE_LIMIT = 300;
 const DRAWER_FILES_LIMIT = 20;
@@ -53,32 +54,33 @@ const linkifyText = (text, { bases, policy, signer }) => {
   return html + esc(text.slice(at));
 };
 
-// Explicit ledger mentions win across profiles. Inferred ownership must be unambiguous: two
-// profiles may use the same task id, so a folder name alone cannot select either one.
+// One profile's attribution: its notes resolve only files under its own roots, and a file under
+// another profile's roots is never its own, whatever a note or folder name says.
+const profileAttribution = (stateDir, metas, policy, profile) => {
+  const scoped = scopePolicy(policy, profile);
+  const mentions = collectMentions(stateDir, metas, scoped);
+  const attribute = createAttribution(metas, mentions.owner);
+  return { ...mentions, scoped, attribute: (file) => (fileProfileOf(file.real, policy) === profile ? attribute(file) : '') };
+};
+
+// Returns the owning task key; a file belongs to at most one profile, so profiles never compete.
 const createProfileAttribution = (profiles, policy) => {
-  const mentions = new Map();
-  const attributes = profiles.map((profile) => {
-    const metas = readLedger(profile.stateDir).filter((m) => m.id);
-    const { owner } = collectMentions(profile.stateDir, metas, policy);
-    owner.forEach((id, real) => mentions.set(real, taskKey(profile.name, id)));
-    return { profile, attribute: createAttribution(metas, owner) };
-  });
+  const byProfile = new Map(
+    profiles.map((p) => [p.name, profileAttribution(p.stateDir, readLedger(p.stateDir).filter((m) => m.id), policy, p.name).attribute]),
+  );
   return (file) => {
-    if (mentions.has(file.real)) return mentions.get(file.real);
-    const candidates = attributes.flatMap(({ profile, attribute }) => {
-      const id = attribute(file);
-      return id ? [taskKey(profile.name, id)] : [];
-    });
-    return candidates.length === 1 ? candidates[0] : '';
+    const profile = fileProfileOf(file.real, policy);
+    const id = byProfile.has(profile) ? byProfile.get(profile)(file) : '';
+    return id ? taskKey(profile, id) : '';
   };
 };
 
 // Adds `files` (newest first) and HTML notes to each served item; the file:// copy never gets them.
-const decorateItems = (items, { stateDir, policy, index, signer, attribute: sharedAttribute }) => {
+// profile names whose notes these are (default: the primary); their links stay inside its roots.
+const decorateItems = (items, { stateDir, policy, index, signer, profile = PRIMARY_PROFILE }) => {
   const metas = readLedger(stateDir).filter((m) => m.id);
   const byId = new Map(metas.map((m) => [m.id, m]));
-  const { byTask, owner } = collectMentions(stateDir, metas, policy);
-  const attribute = sharedAttribute || createAttribution(metas, owner);
+  const { byTask, scoped, attribute } = profileAttribution(stateDir, metas, policy, profile);
   const indexed = new Map();
   index.list().forEach((f) => {
     const id = attribute(f);
@@ -86,7 +88,7 @@ const decorateItems = (items, { stateDir, policy, index, signer, attribute: shar
   });
   return items.map((item) => {
     const meta = byId.get(item.id) || {};
-    const context = { bases: [meta.workdir, meta.repo], policy, signer };
+    const context = { bases: [meta.workdir, meta.repo], policy: scoped, signer };
     const unique = new Map([...(byTask.get(item.id) || []), ...(indexed.get(item.id) || [])].map((f) => [f.real, f]));
     const files = [...unique.values()].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, DRAWER_FILES_LIMIT).map((f) => fileRow(signer, f));
     return {

@@ -103,8 +103,11 @@ from `/tmp` into that folder, including relative image/video assets, and include
 absolute path in the task's ledger report. **Files** discovers HTML, videos and PDFs within
 30 seconds; task notes link other supported types too. Personal drawers have their own file
 links, and Files uses `personal/<task-id>` links so matching task names across profiles do
-not point at the wrong card. Ambiguous folder-only ownership is left unattributed; a ledger
-path resolves it.
+not point at the wrong card. Each profile owns the files under its own roots (Twism: the
+defaults or the explicit global roots; Personal: exactly its `AGENTCTL_FILE_ROOTS`), and a
+task's notes only claim and link files its profile owns, so a Personal note naming a Twism path
+stays plain text, and the reverse. Ambiguous folder-only ownership is left unattributed; a
+ledger path resolves it.
 
 Open **Files** from the existing authenticated phone dashboard, or the task drawer. The
 sample is `~/workspace/github/.claude/tmp/sample-html/sample.html` on `personal/sample-html`.

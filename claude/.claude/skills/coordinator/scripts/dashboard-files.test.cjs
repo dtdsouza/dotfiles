@@ -457,11 +457,11 @@ describe('Personal files on the shared dashboard', () => {
     const personalFile = write(path.join(top, 'personal', 'task-a', 'sample.html'), '<title>Personal sample</title>');
     writeTask(primaryState, { id: 'task-a', name: 'task-a' }, `- 2026-10-31 09:00 ${primaryFile}\n`);
     writeTask(personalState, { id: 'task-a', name: 'task-a', profile: 'personal', harness: 'codex' }, `- 2026-10-31 09:00 ${personalFile}\n`);
-    const policy = loadFilePolicy({ [ROOTS_ENV]: `${top}/primary/**:${top}/personal/**` });
     const profiles = [
       { name: 'twism', label: 'Primary', stateDir: primaryState },
-      { name: 'personal', label: 'Personal', stateDir: personalState },
+      { name: 'personal', label: 'Personal', stateDir: personalState, fileRoots: `${top}/personal/**` },
     ];
+    const policy = loadFilePolicy({ [ROOTS_ENV]: `${top}/primary/**:${top}/personal/**` }, os.homedir(), profiles);
     const server = createDashboardServer({ stateDir: primaryState, profiles, key: KEY, files: { policy, signer: createSigner(), index: createArtifactIndex(policy) } });
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const get = (pathname, authenticated = true) => fetch(`http://127.0.0.1:${server.address().port}${pathname}`, { headers: authenticated ? withCookie() : {} });
