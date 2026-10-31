@@ -109,6 +109,10 @@ task's notes only claim and link files its profile owns, so a Personal note nami
 stays plain text, and the reverse. Ambiguous folder-only ownership is left unattributed; a
 ledger path resolves it.
 
+**Files** has All / Twism / Personal chips; each file carries its profile's badge, and the
+chosen chip is remembered per browser (All by default). `/files?profile=personal` opens on one
+profile; an unknown profile is refused.
+
 Open **Files** from the existing authenticated phone dashboard, or the task drawer. The
 sample is `~/workspace/github/.claude/tmp/sample-html/sample.html` on `personal/sample-html`.
 Use a newly minted link from the dashboard if an individual `/v/` link has expired (one hour)

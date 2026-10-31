@@ -109,6 +109,7 @@ const filesCss = `.fbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;p
 .flink{color:var(--green-ink);text-decoration:none;font-weight:600;word-break:break-all}.flink:hover{text-decoration:underline}
 .frow .where{font:11px/1.4 var(--mono);color:var(--muted);word-break:break-all}
 .frow .age{margin-left:auto;font-size:12px;color:var(--muted)}
+.fsep{width:1px;align-self:stretch;background:var(--line);margin:0 4px}
 .tasklink{color:var(--text);text-decoration:none}.tasklink:hover{color:var(--fg)}
 .files{display:grid;gap:8px}.files .frow{padding:10px 12px}
 .tl .flink,.askbox .flink{font-weight:500}
@@ -116,24 +117,42 @@ const filesCss = `.fbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;p
 
 const kindTag = (kind) => `<span class="tag">${esc(KIND_LABELS[kind] || kind)}</span>`;
 
-const filesPageRow = (row, taskId) =>
-  `<div class="frow" data-kind="${esc(row.kind)}" data-text="${esc(`${row.name} ${row.dir} ${taskId}`.toLowerCase())}"><div class="top">${kindTag(row.kind)}${linkHtml(row, row.name)}<span class="age">${esc(row.age)}</span></div>${
+const PROFILE_STORAGE_KEY = 'agentctl.files.profile';
+
+// The same badge as a lane head: the primary profile gets tone 0, every other one tone 1.
+const profileBadge = (profiles, name) => {
+  const index = profiles.findIndex((p) => p.name === name);
+  return index === -1 ? '' : `<span class="prof p${Math.min(index, 1)}">${esc(profiles[index].label || name)}</span>`;
+};
+
+const filesPageRow = (row, taskId, profile, profiles) =>
+  `<div class="frow" data-kind="${esc(row.kind)}" data-profile="${esc(profile)}" data-text="${esc(`${row.name} ${row.dir} ${taskId}`.toLowerCase())}"><div class="top">${profileBadge(profiles, profile)}${kindTag(row.kind)}${linkHtml(row, row.name)}<span class="age">${esc(row.age)}</span></div>${
     taskId ? `<a class="tasklink pill" href="/#${esc(encodeURIComponent(taskId))}">${esc(taskId)}</a>` : ''
   }<div class="where">${esc(row.dir)}</div></div>`;
 
-const filesPageScript = `
+// The profile choice is a per-browser convenience: storage may be missing or throw, and then the
+// page simply starts on All.
+const filesPageScript = (initialProfile) => `
 const chips = [...document.querySelectorAll('[data-kind-filter]')];
+const profileChips = [...document.querySelectorAll('[data-profile-filter]')];
 const search = document.querySelector('.fbar input');
 const rows = [...document.querySelectorAll('.frow')];
+const PROFILE_KEY = ${JSON.stringify(PROFILE_STORAGE_KEY)};
+const known = (name) => profileChips.some((c) => c.dataset.profileFilter === name);
+const stored = () => { try { return localStorage.getItem(PROFILE_KEY); } catch { return null; } };
+const store = (name) => { try { localStorage.setItem(PROFILE_KEY, name); } catch {} };
 let kind = 'all';
+let profile = [${JSON.stringify(initialProfile || '')}, stored()].find((name) => name && known(name)) || 'all';
 function apply() {
   const q = search.value.trim().toLowerCase();
   let shown = 0;
-  rows.forEach((r) => { r.hidden = !((kind === 'all' || r.dataset.kind === kind) && (!q || r.dataset.text.includes(q))); if (!r.hidden) shown += 1; });
+  rows.forEach((r) => { r.hidden = !((kind === 'all' || r.dataset.kind === kind) && (profile === 'all' || r.dataset.profile === profile) && (!q || r.dataset.text.includes(q))); if (!r.hidden) shown += 1; });
   chips.forEach((c) => c.classList.toggle('on', c.dataset.kindFilter === kind));
+  profileChips.forEach((c) => c.classList.toggle('on', c.dataset.profileFilter === profile));
   document.querySelector('.empty').hidden = shown > 0;
 }
 chips.forEach((c) => c.addEventListener('click', () => { kind = c.dataset.kindFilter; apply(); }));
+profileChips.forEach((c) => c.addEventListener('click', () => { profile = c.dataset.profileFilter; store(profile); apply(); }));
 search.addEventListener('input', apply);
 const LOADED = Date.now();
 document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - LOADED > ${STALE_LINKS_MS} && !search.value) location.reload(); });
@@ -141,12 +160,21 @@ apply();
 `;
 
 // baseCss is the dashboard's own stylesheet, so the page shares its palette and light mode.
-const filesPageHtml = ({ stateDir, profiles, policy, index, signer, nonce, baseCss, remote }) => {
-  const attribute = createProfileAttribution(profiles || [{ name: 'twism', stateDir }], policy);
+// initialProfile must already be a known profile name (the server validates it) or empty.
+const filesPageHtml = ({ stateDir, profiles: given, policy, index, signer, nonce, baseCss, remote, initialProfile = '' }) => {
+  const profiles = given || [{ name: PRIMARY_PROFILE, label: 'Twism', stateDir }];
+  const attribute = createProfileAttribution(profiles, policy);
   const files = index.list().slice(0, FILES_PAGE_LIMIT);
-  const chips = [['all', 'All'], ['html', 'Reports'], ['video', 'Videos'], ['pdf', 'PDFs']]
+  const kindChips = [['all', 'All'], ['html', 'Reports'], ['video', 'Videos'], ['pdf', 'PDFs']]
     .map(([value, label]) => `<button class="chip" type="button" data-kind-filter="${value}">${label}</button>`)
     .join('');
+  const profileChips =
+    profiles.length > 1
+      ? [{ name: 'all', label: 'All' }, ...profiles]
+          .map((p) => `<button class="chip" type="button" data-profile-filter="${esc(p.name)}">${esc(p.label || p.name)}</button>`)
+          .join('')
+      : '';
+  const chips = profileChips ? `${profileChips}<span class="fsep"></span>${kindChips}` : kindChips;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Files · Agents</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -154,8 +182,8 @@ const filesPageHtml = ({ stateDir, profiles, policy, index, signer, nonce, baseC
 <style>${baseCss}${filesCss}</style></head><body${remote ? ' class="remote"' : ''}>
 <div class="topbar"><div class="brand"><h1>Files</h1><span class="pill">${files.length} newest reports, videos and PDFs</span></div><div class="right"><a class="btn" href="/">← Agents</a></div></div>
 <div class="fbar">${chips}<input type="search" placeholder="Filter by name, folder or task" aria-label="Filter files"></div>
-<div class="flist">${files.map((f) => filesPageRow(fileRow(signer, f), attribute(f))).join('')}<div class="empty" hidden>No files match.</div></div>
-<script nonce="${nonce}">${filesPageScript}</script></body></html>`;
+<div class="flist">${files.map((f) => filesPageRow(fileRow(signer, f), attribute(f), fileProfileOf(f.real, policy), profiles)).join('')}<div class="empty" hidden>No files match.</div></div>
+<script nonce="${nonce}">${filesPageScript(initialProfile)}</script></body></html>`;
 };
 
 module.exports = { filesCss, createProfileAttribution, decorateItems, filesPageHtml };

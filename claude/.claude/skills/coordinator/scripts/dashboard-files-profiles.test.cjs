@@ -116,3 +116,109 @@ describe('note links on the served page', () => {
     }
   });
 });
+
+// Runs the Files page script against a minimal DOM: the rows and chips it renders, and a storage
+// that can be missing, empty or throwing.
+const runFilesScript = (html, storage) => {
+  const script = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
+  const element = (attrs) => {
+    const listeners = {};
+    const classes = new Set();
+    return {
+      dataset: attrs,
+      hidden: false,
+      value: '',
+      classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)), contains: (c) => classes.has(c) },
+      addEventListener: (type, fn) => (listeners[type] = fn),
+      click: () => listeners.click && listeners.click(),
+    };
+  };
+  const data = (tag, attr) => [...html.matchAll(new RegExp(`<${tag} class="[^"]*"[^>]*?((?:data-[a-z-]+="[^"]*"\\s*)+)`, 'g'))]
+    .map((m) => Object.fromEntries([...m[1].matchAll(/data-([a-z-]+)="([^"]*)"/g)].map(([, k, v]) => [k.replace(/-(\w)/g, (_, c) => c.toUpperCase()), v])))
+    .filter((d) => attr in d);
+  const rows = data('div', 'profile').map(element);
+  const kindChips = data('button', 'kindFilter').map(element);
+  const profileChips = data('button', 'profileFilter').map(element);
+  const search = element({});
+  const empty = element({});
+  const document = {
+    hidden: false,
+    addEventListener: () => {},
+    querySelector: (sel) => (sel === '.fbar input' ? search : sel === '.empty' ? empty : null),
+    querySelectorAll: (sel) => (sel === '.frow' ? rows : sel === '[data-kind-filter]' ? kindChips : sel === '[data-profile-filter]' ? profileChips : []),
+  };
+  new Function('document', 'localStorage', 'location', script)(document, storage, { reload: () => {} });
+  const shown = () => rows.filter((r) => !r.hidden).map((r) => r.dataset.profile);
+  const chip = (name) => profileChips.find((c) => c.dataset.profileFilter === name);
+  return { shown, chip };
+};
+
+const memoryStorage = (initial = {}) => {
+  const values = { ...initial };
+  return { values, getItem: (k) => (k in values ? values[k] : null), setItem: (k, v) => (values[k] = String(v)) };
+};
+
+describe('Files page profile filter', () => {
+  let world;
+  let server;
+  const files = async (query = '') => fetch(`http://127.0.0.1:${server.address().port}/files${query}`, { headers: { Cookie: `${COOKIE}=${KEY}` } });
+
+  test('starts a server over both profiles', async () => {
+    world = buildWorld();
+    server = createDashboardServer({ stateDir: world.profiles[0].stateDir, profiles: world.profiles, key: KEY, files: { policy: world.policy, signer: createSigner(), index: world.index } });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  });
+
+  test('offers All and one chip per profile, and badges each file with its profile', async () => {
+    const html = await (await files()).text();
+    const chips = [...html.matchAll(/data-profile-filter="([^"]+)"[^>]*>([^<]+)</g)].map((m) => `${m[1]}:${m[2]}`);
+    assert.deepEqual(chips, ['all:All', 'twism:Twism', 'personal:Personal']);
+    const rows = html.split('<div class="frow"').slice(1);
+    const row = (name) => {
+      const found = rows.find((r) => new RegExp(`>${name}<`).test(r));
+      return [found, found.match(/data-profile="([^"]*)"/)[1]];
+    };
+    assert.equal(row('report\\.html')[1], 'twism');
+    assert.equal(row('personal\\.html')[1], 'personal');
+    assert.match(row('report\\.html')[0], /<span class="prof p0">Twism<\/span>/);
+    assert.match(row('personal\\.html')[0], /<span class="prof p1">Personal<\/span>/);
+  });
+
+  test('defaults to All, even when storage throws', async () => {
+    const html = await (await files()).text();
+    const broken = { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); } };
+    const page = runFilesScript(html, broken);
+    assert.deepEqual(page.shown().sort(), ['personal', 'twism']);
+    page.chip('personal').click();
+    assert.deepEqual(page.shown(), ['personal']);
+  });
+
+  test('remembers the chosen profile per browser and ignores a stored unknown one', async () => {
+    const html = await (await files()).text();
+    const storage = memoryStorage();
+    runFilesScript(html, storage).chip('twism').click();
+    assert.deepEqual(runFilesScript(html, storage).shown(), ['twism']);
+    assert.deepEqual(runFilesScript(html, memoryStorage({ [Object.keys(storage.values)[0]]: 'nope' })).shown().sort(), ['personal', 'twism']);
+  });
+
+  test('a profile in the URL preselects its chip; an unknown one is refused', async () => {
+    const html = await (await files('?profile=personal')).text();
+    assert.deepEqual(runFilesScript(html, memoryStorage()).shown(), ['personal']);
+    for (const bad of ['nope', '<script>', '']) {
+      const res = await files(`?profile=${encodeURIComponent(bad)}`);
+      assert.equal(res.status, 400, bad);
+    }
+  });
+
+  test('task drawers still list only their own task files', async () => {
+    const page = await (await fetch(`http://127.0.0.1:${server.address().port}/`, { headers: { Cookie: `${COOKIE}=${KEY}` } })).text();
+    const items = JSON.parse(page.match(/const ITEMS = (\{.*\});\n/)[1].replace(/\\u003c/g, '<'));
+    assert.deepEqual(items['twism-task'].files.map((f) => f.name), ['report.html']);
+    assert.deepEqual(items['personal/codex-task'].files.map((f) => f.name), ['personal.html']);
+  });
+
+  test('stops the server', async () => {
+    await new Promise((resolve) => server.close(resolve));
+    world.cleanup();
+  });
+});

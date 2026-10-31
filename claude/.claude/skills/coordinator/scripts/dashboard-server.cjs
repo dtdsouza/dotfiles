@@ -254,8 +254,10 @@ const handleFilesPage = (req, res, context) => {
   if (site && site !== 'same-origin' && site !== 'none') return send(res, 403, 'Cross-site request refused.');
   if (!safeEqual(readCookie(req.headers.cookie, COOKIE), context.key)) return send(res, 401, LOCKED_PAGE);
   if (!context.allowPeek()) return send(res, 429, 'Too many refreshes; wait a minute.');
+  const requested = context.url.searchParams.get('profile');
+  if (requested !== null && requested !== 'all' && !context.profiles.some((p) => p.name === requested)) return send(res, 400, 'Unknown profile.');
   const nonce = crypto.randomBytes(16).toString('base64');
-  const html = filesPageHtml({ stateDir: context.stateDir, profiles: context.profiles, ...files, nonce, baseCss: css, remote: context.via === 'tailnet' });
+  const html = filesPageHtml({ stateDir: context.stateDir, profiles: context.profiles, ...files, nonce, baseCss: css, remote: context.via === 'tailnet', initialProfile: requested || '' });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
 };
 
