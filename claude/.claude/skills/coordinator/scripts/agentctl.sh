@@ -7,7 +7,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PRIMARY_PROFILE=twism
 # Every profile but the primary is a shell env file; the vars below are all it may set.
 PROFILE_VARS=(COORDINATOR_STATE_DIR COORDINATOR_DEFAULT_REPO AGENTCTL_LABEL AGENTCTL_SESSION AGENTCTL_HARNESS
-  AGENTCTL_ALLOWED_HARNESSES AGENTCTL_MODEL AGENTCTL_COORDINATOR_MODEL AGENTCTL_DENY_ROOTS AGENTCTL_SCRUB_ENV)
+  AGENTCTL_ALLOWED_HARNESSES AGENTCTL_MODEL AGENTCTL_COORDINATOR_MODEL AGENTCTL_DENY_ROOTS AGENTCTL_KEEP_ENV)
 PROFILE="${AGENTCTL_PROFILE:-$PRIMARY_PROFILE}"
 if [[ ${1:-} == --profile ]]; then
   PROFILE="${2:-}"
@@ -32,7 +32,8 @@ fi
 HARNESS="${AGENTCTL_HARNESS:-claude}"
 ALLOWED_HARNESSES="${AGENTCTL_ALLOWED_HARNESSES:-$HARNESS}"
 PROFILE_SESSION="${AGENTCTL_SESSION:-}"
-SCRUB_ENV="${AGENTCTL_SCRUB_ENV:-}"
+# An allowlist: every other env var is dropped from the profile's agents. Empty keeps everything.
+KEEP_ENV="${AGENTCTL_KEEP_ENV:-}"
 DENY_ROOTS="${AGENTCTL_DENY_ROOTS:-}"
 DEFAULT_REPO="${COORDINATOR_DEFAULT_REPO:-$HOME/workspace/twism/platform/monorepo}"
 # Lives under the coordinator's cwd (DEFAULT_REPO) because the agent sandbox only lets a session
@@ -89,6 +90,9 @@ Usage:
   agentctl.sh dashboard --url [--tailnet]   print the keyed URL that opens the served page (--tailnet: the phone's https URL)
   agentctl.sh resume <id>                   new tmux session in the task's workdir running `claude --resume <id>`
   agentctl.sh install-jump-handler          register tmuxjump:// links (the page's "Open in terminal" button)
+  agentctl.sh up [--no-attach]              after a reboot: per profile, create its tmux session and start its
+                                            coordinator if missing, serve the dashboard if nothing does, list
+                                            tasks whose tabs are gone (never resumes them), then attach to Twism
   agentctl.sh coordinator [--model <model>] [--effort <level>] [--name <session-name>]
                           [--compact-window <tokens>]
       Launches the coordinator in the default repo with a SessionStart hook that injects
@@ -130,15 +134,16 @@ guard_dir() {
 
 scrub_env() {
   local name
-  [[ -n $SCRUB_ENV ]] || return 0
+  [[ -n $KEEP_ENV ]] || return 0
   while IFS= read -r name; do
-    if [[ $name =~ $SCRUB_ENV ]]; then unset "$name"; fi
+    if [[ ! $name =~ $KEEP_ENV ]]; then unset "$name" 2>/dev/null || true; fi
   done < <(compgen -e)
 }
 
 # Codex's shell snapshot sources the user's rc files, which would export the work secrets that
-# scrub_env just removed.
-CODEX_BASE_ARGS=(-s workspace-write -a on-request --disable shell_snapshot)
+# scrub_env just removed; the shared daemon would run commands with the env of whichever Codex
+# started it, possibly a work shell.
+CODEX_BASE_ARGS=(-s workspace-write -a on-request --no-daemon --disable shell_snapshot)
 
 codex_effort() {
   case "$1" in
@@ -659,9 +664,9 @@ mark_coordinator_pane() {
 prepare_session_env() {
   local session="$1" name
   tmux set-environment -t "$session" AGENT_PROFILE "$PROFILE" \; set-environment -t "$session" AGENTCTL_PROFILE "$PROFILE"
-  [[ -n $SCRUB_ENV ]] || return 0
+  [[ -n $KEEP_ENV ]] || return 0
   while IFS= read -r name; do
-    if [[ $name =~ $SCRUB_ENV ]]; then tmux set-environment -t "$session" -r "$name"; fi
+    if [[ ! $name =~ $KEEP_ENV ]]; then tmux set-environment -t "$session" -r "$name"; fi
   done < <({ compgen -e; tmux show-environment -g | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'; } | sort -u)
 }
 
@@ -706,6 +711,134 @@ cmd_coordinator() {
   exec claude "${args[@]}"
 }
 
+profile_names() {
+  local file
+  for file in "${XDG_CONFIG_HOME:-$HOME/.config}"/agentctl/profiles/*.env; do
+    [[ -e $file ]] || continue
+    file="$(basename "$file" .env)"
+    [[ $file =~ ^[a-z0-9][a-z0-9-]{0,31}$ && $file != "$PRIMARY_PROFILE" ]] && printf '%s\n' "$file"
+  done
+}
+
+other_profile_sessions() {
+  local file
+  for file in "${XDG_CONFIG_HOME:-$HOME/.config}"/agentctl/profiles/*.env; do
+    [[ -e $file && $(basename "$file" .env) != "$PROFILE" ]] || continue
+    sed -n "s/^AGENTCTL_SESSION=['\"]\{0,1\}\([^'\"]*\).*/\1/p" "$file"
+  done
+}
+
+# The profile's coordinator pane: marked with its role and profile (no profile = the primary), or for
+# the primary an unmarked window named `coordinator` outside every other profile's session, the same
+# rule the dashboard uses.
+find_coordinator_pane() {
+  local pane session window role profile others
+  others=" $(other_profile_sessions | tr '\n' ' ') "
+  local fallback=""
+  while IFS='|' read -r pane session window role profile; do
+    if [[ $role == coordinator && ${profile:-$PRIMARY_PROFILE} == "$PROFILE" ]]; then
+      printf '%s' "$pane"
+      return 0
+    fi
+    if [[ -z $fallback && $PROFILE == "$PRIMARY_PROFILE" && -z $role && $window == coordinator && $others != *" $session "* ]]; then
+      fallback="$pane"
+    fi
+  done < <(tmux list-panes -a -F '#{pane_id}|#{session_name}|#{window_name}|#{@agentctl-role}|#{@agentctl-profile}' 2>/dev/null)
+  printf '%s' "$fallback"
+}
+
+# Vars a tab started by tmux would otherwise miss: the server's env predates them.
+passthrough_env_args() {
+  local name
+  for name in COORDINATOR_STATE_DIR COORDINATOR_DEFAULT_REPO COORDINATOR_DASHBOARD_PORT COORDINATOR_DASHBOARD_TAILNET \
+    COORDINATOR_DASHBOARD_FILE_ROOTS AGENTCTL_PRIMARY_STATE_DIR XDG_CONFIG_HOME XDG_STATE_HOME; do
+    if [[ -n ${!name:-} ]]; then printf -- '-e\n%s=%s\n' "$name" "${!name}"; fi
+  done
+}
+
+list_lost_tabs() {
+  local task_dir id pane_id harness
+  while IFS= read -r task_dir; do
+    id="$(jq -r '.id' "$task_dir/meta.json")"
+    pane_id="$(jq -r '.paneId // ""' "$task_dir/meta.json")"
+    harness="$(jq -r '.harness // "claude"' "$task_dir/meta.json")"
+    [[ -n $pane_id ]] && pane_exists "$pane_id" && continue
+    if [[ $harness == claude ]]; then
+      echo "  $id: $(self_command) resume $id"
+    else
+      echo "  $id: codex resume (in $(jq -r '.workdir' "$task_dir/meta.json"))"
+    fi
+  done < <(task_dirs false)
+}
+
+# One profile's part of `up`; prints `session=<name>` last so the caller knows where it lives.
+cmd_up_profile() {
+  local pane session env_args=() lost
+  mapfile -t env_args < <(passthrough_env_args)
+  pane="$(find_coordinator_pane)"
+  if [[ -n $pane ]]; then
+    session="$(tmux display-message -p -t "$pane" '#{session_name}')"
+    echo "$PROFILE: coordinator already running in session $session ($pane)"
+  else
+    session="$PROFILE_SESSION"
+    if [[ -z $session && $PROFILE == "$PRIMARY_PROFILE" ]]; then
+      # Twism tabs may live in a session with another name (`0`); reuse it rather than adding one.
+      session="$(task_dirs false | while IFS= read -r d; do p="$(jq -r '.paneId // ""' "$d/meta.json")"; [[ -n $p ]] && pane_exists "$p" && tmux display-message -p -t "$p" '#{session_name}' && break; done)"
+    fi
+    session="${session:-$PROFILE}"
+    local command="bash $(printf %q "$SCRIPT_PATH") --profile $PROFILE coordinator"
+    if tmux has-session -t "=$session" 2>/dev/null; then
+      tmux new-window -d -t "=$session:" -n coordinator -c "$DEFAULT_REPO" "${env_args[@]}" "$command"
+    else
+      tmux new-session -d -s "$session" -n coordinator -c "$DEFAULT_REPO" "${env_args[@]}" "$command"
+    fi
+    echo "$PROFILE: started the coordinator in session $session"
+  fi
+  tmux set-environment -t "=$session" AGENT_PROFILE "$PROFILE" \; set-environment -t "=$session" AGENTCTL_PROFILE "$PROFILE"
+  [[ $PROFILE == "$PRIMARY_PROFILE" ]] || prepare_session_env "=$session"
+  lost="$(list_lost_tabs)"
+  if [[ -n $lost ]]; then
+    echo "$PROFILE: tasks whose tabs are gone (resume by hand if needed):"
+    echo "$lost"
+  fi
+  echo "session=$session"
+}
+
+dashboard_serving() {
+  local port="${COORDINATOR_DASHBOARD_PORT:-47317}"
+  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
+}
+
+cmd_up() {
+  local attach=true output twism_session name env_args=()
+  [[ ${1:-} == --no-attach ]] && attach=false
+  [[ $PROFILE == "$PRIMARY_PROFILE" ]] || die "up starts every profile; run it without --profile"
+  output="$(cmd_up_profile)"
+  grep -v '^session=' <<<"$output"
+  twism_session="$(sed -n 's/^session=//p' <<<"$output")"
+  while IFS= read -r name; do
+    output="$(bash "$SCRIPT_PATH" --profile "$name" _up_profile)" || { echo "$name: up failed"; continue; }
+    grep -v '^session=' <<<"$output"
+  done < <(profile_names)
+  if dashboard_serving; then
+    echo "dashboard already serving on 127.0.0.1:${COORDINATOR_DASHBOARD_PORT:-47317}"
+  else
+    mapfile -t env_args < <(passthrough_env_args)
+    local window
+    window="$(tmux new-window -d -P -F '#{window_id}' -t "=$twism_session:" -n dashboard -c "$DEFAULT_REPO" "${env_args[@]}" \
+      "bash $(printf %q "$SCRIPT_PATH") dashboard --serve; exec \${SHELL:-bash} -i")"
+    name_window "$window" dashboard
+    echo "dashboard: started in session $twism_session ($window)"
+  fi
+  echo "attach: tmux attach -t =$twism_session"
+  $attach || return 0
+  if [[ -n ${TMUX:-} ]]; then
+    tmux switch-client -t "=$twism_session"
+  else
+    exec tmux attach -t "=$twism_session"
+  fi
+}
+
 main() {
   local command="${1:-}"
   (($#)) && shift
@@ -720,6 +853,8 @@ main() {
     dashboard) cmd_dashboard "$@" ;;
     resume) cmd_resume "$@" ;;
     install-jump-handler) cmd_install_jump_handler ;;
+    up) cmd_up "$@" ;;
+    _up_profile) cmd_up_profile ;;
     coordinator) cmd_coordinator "$@" ;;
     _settings) coordinator_settings "${1:-$COORDINATOR_COMPACT_WINDOW}" ;;
     _run) cmd_run "$@" ;;

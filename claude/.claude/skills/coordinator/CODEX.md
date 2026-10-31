@@ -16,7 +16,7 @@ Run every agentctl command exactly as your launch prompt shows (`bash <path>/age
 3. Spawn, naming the tab for the goal:
    ```sh
    bash <path>/agentctl.sh --profile <profile> spawn \
-     --name plot-twist-onboarding-copy --model gpt-6-sol --effort medium \
+     --name plot-twist-onboarding-copy --model gpt-6.1-sol --effort medium \
      --brief /tmp/plot-twist-onboarding-copy.md --coordinator coordinator \
      --repo ~/workspace/github/plot-twist
    ```
@@ -27,8 +27,8 @@ Run every agentctl command exactly as your launch prompt shows (`bash <path>/age
 | Task shape | Model | Effort |
 |---|---|---|
 | Mechanical and fully specified: run a known script, status lookup, reformat, summarize | gpt-6-luna | low |
-| Clear spec: known approach, bug with a known cause, tests, review | gpt-6-sol | medium |
-| Ambiguous or risky: unknown root cause, design, cross-repo | gpt-6-sol | high |
+| Clear spec: known approach, bug with a known cause, tests, review | gpt-6.1-sol | medium |
+| Ambiguous or risky: unknown root cause, design, cross-repo | gpt-6.1-sol | high |
 
 ## Brief recipe
 

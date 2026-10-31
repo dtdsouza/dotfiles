@@ -72,7 +72,7 @@ before(() => {
       'AGENTCTL_MODEL=gpt-6-sol',
       'AGENTCTL_COORDINATOR_MODEL=gpt-6-sol',
       `AGENTCTL_DENY_ROOTS=${twismRoot}`,
-      "AGENTCTL_SCRUB_ENV='(TOKEN|SECRET|_KEY)$'",
+      "AGENTCTL_KEEP_ENV='^(HOME|PATH|TERM|LANG|TMUX|TMUX_PANE|XDG_CONFIG_HOME|AGENT_PROFILE|AGENTCTL_[A-Z_]+|COORDINATOR_[A-Z_]+)$'",
       '',
     ].join('\n'),
   );
@@ -83,6 +83,7 @@ before(() => {
     HOME: home,
     PATH: `${bin}:${process.env.PATH}`,
     GITLAB_TOKEN: 'probe-token',
+    UNLISTED_SETTING: 'not-on-the-allowlist',
     XDG_CONFIG_HOME: path.join(home, '.config'),
     AGENTCTL_PRIMARY_STATE_DIR: twismState,
     AGENTCTL_REPORT_RETRIES: '0',
@@ -170,10 +171,12 @@ describe('personal spawn', () => {
     assert.ok(await waitFor(() => fs.readdirSync(env.out).some((f) => f.startsWith('codex-') && f.endsWith('.env'))), 'codex stub never started');
     const stub = fs.readdirSync(env.out).find((f) => f.startsWith('codex-') && f.endsWith('.args')).replace(/\.args$/, '');
     const args = readOr(path.join(env.out, `${stub}.args`)).trim().split('\n');
-    assert.deepEqual(args.slice(0, 10), ['-C', path.join(env.personalWork, 'sandbox'), '-s', 'workspace-write', '-a', 'on-request', '--disable', 'shell_snapshot', '-m', 'gpt-6-sol']);
+    assert.deepEqual(args.slice(0, 11), ['-C', path.join(env.personalWork, 'sandbox'), '-s', 'workspace-write', '-a', 'on-request', '--no-daemon', '--disable', 'shell_snapshot', '-m', 'gpt-6-sol']);
     assert.ok(args.includes('model_reasoning_effort="xhigh"'));
     const stubEnv = readOr(path.join(env.out, `${stub}.env`));
     assert.doesNotMatch(stubEnv, /^GITLAB_TOKEN=/m);
+    assert.doesNotMatch(stubEnv, /^UNLISTED_SETTING=/m);
+    assert.match(stubEnv, /^TMUX=/m);
     assert.match(stubEnv, /^AGENT_PROFILE=personal$/m);
     assert.match(stubEnv, /^AGENTCTL_PROFILE=personal$/m);
     assert.equal(tmux('display-message', '-p', '-t', meta.windowId, '#{session_name}'), 'personal');
@@ -192,8 +195,12 @@ describe('coordinators', () => {
     assert.equal(paneOption(primary, '@agentctl-role'), 'coordinator');
     assert.equal(paneOption(pane, '@agentctl-role'), 'coordinator');
     assert.equal(tmux('display-message', '-p', '-t', pane, '#{window_name}'), 'coordinator');
+    // The pane is marked before the session env is scrubbed, so wait for the scrub to finish.
+    assert.ok(await waitFor(() => /^-UNLISTED_SETTING$/m.test(tmux('show-environment', '-t', 'personal'))), 'session env never scrubbed');
     const sessionEnv = tmux('show-environment', '-t', 'personal');
     assert.match(sessionEnv, /^-GITLAB_TOKEN$/m);
+    assert.match(sessionEnv, /^-UNLISTED_SETTING$/m);
+    assert.doesNotMatch(sessionEnv, /^-TMUX$/m);
     assert.match(sessionEnv, /^AGENT_PROFILE=personal$/m);
     assert.ok(await waitFor(() => fs.readdirSync(env.out).filter((f) => f.startsWith('codex-') && f.endsWith('.args')).length >= 2));
     const args = fs
