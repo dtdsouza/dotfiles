@@ -116,6 +116,14 @@ describe('page', () => {
   });
 });
 
+describe('collapsible lanes', () => {
+  test('each lane has a toggle and a summary of what collapsing hides', () => {
+    assert.match(env.page, /<button class="lanetoggle" type="button" data-lane-toggle="personal" aria-expanded="true"/);
+    assert.match(env.page, /<span class="lanesum" data-lane-sum="personal">2 working<\/span>/);
+    assert.match(env.page, /<span class="lanesum" data-lane-sum="twism">nothing open<\/span>/);
+  });
+});
+
 describe('routing by profile', () => {
   test('a message for personal reaches only the Codex coordinator', async () => {
     const res = await post('/api/message', { text: 'status?', profile: 'personal' });

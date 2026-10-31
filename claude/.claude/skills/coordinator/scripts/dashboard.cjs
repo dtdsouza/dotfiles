@@ -237,6 +237,11 @@ pre{background:var(--surface);border:1px solid var(--line);border-radius:16px;pa
 .lane{margin:0 40px;padding:20px 0 0;border-top:1px solid var(--line)}.lane:first-of-type{border-top:0}
 .lanehead{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:14px}
 .lanetitle{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.lanetitle h2{font-size:22px}
+.lanetoggle{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--text);cursor:pointer;font:14px var(--body);transition:transform .2s,border-color .2s}
+.lanetoggle:hover{border-color:var(--edge);color:var(--fg)}
+.lane.collapsed .lanetoggle{transform:rotate(-90deg)}
+.lanesum{font-size:12px;color:var(--muted)}.lane:not(.collapsed) .lanesum{display:none}
+.lane.collapsed .board{display:none}.lane.collapsed{padding-bottom:6px}
 .lane .board{padding:0 0 22px}.lane .col{min-height:0}
 .prof{display:inline-flex;align-items:center;border-radius:999px;padding:1px 9px;font:600 11px/18px var(--body);border:1px solid var(--line);color:var(--fg);white-space:nowrap}
 .prof.p0{color:var(--blue-glow);border-color:color-mix(in srgb,var(--blue-glow) 50%,transparent);background:color-mix(in srgb,var(--blue-glow) 10%,transparent)}
@@ -305,14 +310,29 @@ const COLUMNS = [
 
 const boardHtml = (items, served, profile) => `<div class="board">${COLUMNS.map((c) => columnHtml(items, c, served, profile)).join('')}</div>`;
 
-// Option 3 of the two-coordinator review: one swimlane per profile, each with its own coordinator console.
+const LANE_SUMMARY = [
+  ['review', 'needs you', 'need you'],
+  ['blocked', 'blocked', 'blocked'],
+  ['working', 'working', 'working'],
+];
+
+const laneSummary = (items) =>
+  LANE_SUMMARY.map(([status, one, many]) => [items.filter((a) => a.status === status).length, one, many])
+    .filter(([count]) => count > 0)
+    .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`)
+    .join(' · ') || 'nothing open';
+
+// Option 3 of the two-coordinator review: one swimlane per profile, each with its own coordinator
+// console. A lane collapses to its header (summary and console stay), remembered per browser.
 const lanesHtml = (items, profiles, served) =>
   profiles
     .map((p, index) => {
       const mine = items.filter((a) => a.profile === p.name);
       const where = `${p.session ? `tmux session ${p.session} · ` : ''}${p.harness} · ledger ${p.stateDir.replace(process.env.HOME || '\0', '~')}`;
       const consoleHtml = served ? ui.laneActionsHtml(p.name, p.label) : '';
-      return `<section class="lane" data-profile="${esc(p.name)}"><div class="lanehead"><div class="lanetitle"><span class="prof p${Math.min(index, 1)}">${esc(p.label)}</span><h2>${esc(p.label)}</h2><span class="meta">${esc(where)}</span></div>${consoleHtml}</div>${boardHtml(mine, served, p.name)}</section>`;
+      const toggle = `<button class="lanetoggle" type="button" data-lane-toggle="${esc(p.name)}" aria-expanded="true" title="Collapse or expand the ${esc(p.label)} lane">▾</button>`;
+      const summary = `<span class="lanesum" data-lane-sum="${esc(p.name)}">${esc(laneSummary(mine))}</span>`;
+      return `<section class="lane" data-profile="${esc(p.name)}"><div class="lanehead"><div class="lanetitle">${toggle}<span class="prof p${Math.min(index, 1)}">${esc(p.label)}</span><h2>${esc(p.label)}</h2><span class="meta">${esc(where)}</span>${summary}</div>${consoleHtml}</div>${boardHtml(mine, served, p.name)}</section>`;
     })
     .join('');
 
@@ -385,6 +405,23 @@ function applyFilterTo(col) {
 }
 function applyFilter() { document.querySelectorAll('[data-status="done"]').forEach(applyFilterTo); }
 function setFilter(next) { filter = next; writeFilter(filter); applyFilter(); }
+const LANES_KEY = 'agents.collapsedLanes';
+const readCollapsed = () => { try { return new Set(JSON.parse(localStorage.getItem(LANES_KEY)) || []); } catch (_) { return new Set(); } };
+const writeCollapsed = (set) => { try { localStorage.setItem(LANES_KEY, JSON.stringify([...set])); } catch (_) {} };
+function applyCollapsed(collapsed) {
+  document.querySelectorAll('.lane').forEach((lane) => {
+    const closed = collapsed.has(lane.dataset.profile);
+    lane.classList.toggle('collapsed', closed);
+    const toggle = lane.querySelector('[data-lane-toggle]');
+    if (toggle) toggle.setAttribute('aria-expanded', String(!closed));
+  });
+}
+function toggleLane(profile) {
+  const collapsed = readCollapsed();
+  if (collapsed.has(profile)) collapsed.delete(profile); else collapsed.add(profile);
+  writeCollapsed(collapsed);
+  applyCollapsed(collapsed);
+}
 document.addEventListener('change', (e) => {
   if (e.target.matches('[data-from], [data-to]')) {
     const custom = e.target.closest('.custom');
@@ -394,6 +431,8 @@ document.addEventListener('change', (e) => {
 function reloadIfIdle() { if (!(window.dashboardBusy && window.dashboardBusy())) location.reload(); }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - GENERATED_MS > STALE_MS) reloadIfIdle(); });
 document.addEventListener('click', (e) => {
+  const laneToggle = e.target.closest('[data-lane-toggle]');
+  if (laneToggle) return toggleLane(laneToggle.dataset.laneToggle);
   const refresh = e.target.closest('#refresh');
   if (refresh) { refresh.textContent = 'Refreshing…'; setTimeout(() => location.reload(), 1500); return; }
   const chip = e.target.closest('[data-range]');
@@ -406,6 +445,7 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
 applyFilter();
+applyCollapsed(readCollapsed());
 // Option 5 of the two-coordinator review: on a phone the lanes become one feed, most urgent first.
 const profileBadge = (name) => { const p = PROFILES.find((x) => x.name === name) || { label: name, tone: 1 }; return '<span class="prof p' + p.tone + '">' + esc(p.label) + '</span>'; };
 function buildPhoneFeed() {
