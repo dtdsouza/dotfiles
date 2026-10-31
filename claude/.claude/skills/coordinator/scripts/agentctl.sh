@@ -136,6 +136,10 @@ scrub_env() {
   done < <(compgen -e)
 }
 
+# Codex's shell snapshot sources the user's rc files, which would export the work secrets that
+# scrub_env just removed.
+CODEX_BASE_ARGS=(-s workspace-write -a on-request --disable shell_snapshot)
+
 codex_effort() {
   case "$1" in
     max) echo xhigh ;;
@@ -192,7 +196,8 @@ worker_footer() {
 - You are a worker session spawned by the coordinator of profile \`$PROFILE\`; your task id is \`$id\`.
 - When you finish, get blocked, or need a decision from the user, report to the coordinator with
   \`$(self_command) report $id done|blocked|question|progress "<1-3 lines with links and file paths>"\`.
-  It notes the ledger and types the report into the coordinator's prompt.
+  It notes the ledger and types the report into the coordinator's prompt. Run it on its own, never
+  chained with other commands: only that exact form may leave the sandbox to reach the coordinator.
 - The coordinator owns this tmux tab's name; don't rename it.
 EOF
     return
@@ -349,7 +354,7 @@ cmd_run() {
   set_phase running
   if [[ $harness == codex ]]; then
     scrub_env
-    local args=(-C "$workdir" -s workspace-write -a on-request)
+    local args=(-C "$workdir" "${CODEX_BASE_ARGS[@]}")
     if [[ -n $model ]]; then args+=(-m "$model"); fi
     if [[ -n $effort ]]; then args+=(-c "model_reasoning_effort=\"$(codex_effort "$effort")\""); fi
     codex "${args[@]}" "$prompt" || true
@@ -492,6 +497,10 @@ cmd_report() {
   [[ $kind =~ ^(done|blocked|question|progress)$ ]] || die "report kind must be done|blocked|question|progress, not '$kind'"
   task_dir="$(require_task "$id")"
   text="$*"
+  # Inside Codex's sandbox a chained command can reach neither tmux nor the ledger; refuse before
+  # writing anything so the rerun doesn't note it twice.
+  tmux list-sessions >/dev/null 2>&1 ||
+    die "can't reach tmux (sandboxed?); run this report again as a command on its own: $(self_command) report $id $kind \"$text\""
   printf -- '- %s [%s] %s\n' "$(stamp)" "$kind" "$text" >>"$task_dir/notes.md"
   refresh_dashboard
   deliver_report "[$id] $kind: $text"
@@ -685,7 +694,7 @@ cmd_coordinator() {
     prompt="$(codex_coordinator_prompt)"
     scrub_env
     export AGENT_PROFILE="$PROFILE" AGENTCTL_PROFILE="$PROFILE"
-    local codex_args=(-C "$DEFAULT_REPO" -s workspace-write -a on-request)
+    local codex_args=(-C "$DEFAULT_REPO" "${CODEX_BASE_ARGS[@]}")
     if [[ -n $model ]]; then codex_args+=(-m "$model"); fi
     if [[ -n $effort ]]; then codex_args+=(-c "model_reasoning_effort=\"$(codex_effort "$effort")\""); fi
     exec codex "${codex_args[@]}" "$prompt"

@@ -164,12 +164,13 @@ describe('personal spawn', () => {
     assert.equal(meta.session, 'personal');
     const brief = fs.readFileSync(path.join(env.personalState, 'tasks', 'sandbox-probe', 'brief.md'), 'utf8');
     assert.match(brief, /--profile personal report sandbox-probe/);
+    assert.match(brief, /on its own/);
     assert.doesNotMatch(brief, /SendMessage/);
 
     assert.ok(await waitFor(() => fs.readdirSync(env.out).some((f) => f.startsWith('codex-') && f.endsWith('.env'))), 'codex stub never started');
     const stub = fs.readdirSync(env.out).find((f) => f.startsWith('codex-') && f.endsWith('.args')).replace(/\.args$/, '');
     const args = readOr(path.join(env.out, `${stub}.args`)).trim().split('\n');
-    assert.deepEqual(args.slice(0, 8), ['-C', path.join(env.personalWork, 'sandbox'), '-s', 'workspace-write', '-a', 'on-request', '-m', 'gpt-6-sol']);
+    assert.deepEqual(args.slice(0, 10), ['-C', path.join(env.personalWork, 'sandbox'), '-s', 'workspace-write', '-a', 'on-request', '--disable', 'shell_snapshot', '-m', 'gpt-6-sol']);
     assert.ok(args.includes('model_reasoning_effort="xhigh"'));
     const stubEnv = readOr(path.join(env.out, `${stub}.env`));
     assert.doesNotMatch(stubEnv, /^GITLAB_TOKEN=/m);
@@ -216,6 +217,15 @@ describe('coordinators', () => {
         .find((t) => t.includes('PR #7 open'));
     assert.ok(await waitFor(typedFile), 'the coordinator never received the report');
     assert.match(typedFile(), /^\[via agentctl\] \[sandbox-probe\] done: PR #7 open$/m);
+  });
+
+  test('report from a sandbox that cannot reach tmux writes nothing and says to rerun it on its own', () => {
+    const notes = path.join(env.personalState, 'tasks', 'sandbox-probe', 'notes.md');
+    const before = readOr(notes);
+    const r = agentctl(['--profile', 'personal', 'report', 'sandbox-probe', 'progress', 'halfway'], { TMUX: '/nonexistent/socket,1,0' });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /run this report again as a command on its own/);
+    assert.equal(readOr(notes), before);
   });
 
   test('report refuses an unknown kind', () => {
