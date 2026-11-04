@@ -87,6 +87,7 @@ Usage:
   agentctl.sh brief                         standing instructions + active tasks with recent notes
   agentctl.sh dashboard [--watch]           regenerate the status page once; --watch loops every 5 min
   agentctl.sh dashboard --serve             serve the page with actions on 127.0.0.1 (and keep the file fresh)
+  agentctl.sh dashboard --ensure            serve it in a `dashboard` tab unless something already serves it (idempotent)
   agentctl.sh dashboard --url [--tailnet]   print the keyed URL that opens the served page (--tailnet: the phone's https URL)
   agentctl.sh resume <id>                   new tmux session in the task's workdir running `claude --resume <id>`
   agentctl.sh adopt-tabs [--dry-run]        one-time: tag every profile's tabs spawned before task tags existed
@@ -549,6 +550,30 @@ deliver_report() {
   fi
 }
 
+dashboard_serving() {
+  local port="${COORDINATOR_DASHBOARD_PORT:-47317}"
+  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
+}
+
+# Idempotent: a no-op while something listens on the dashboard port. Opens a `dashboard` window in the
+# given session (default: the caller's) otherwise; the session is created if the tmux server lacks it.
+ensure_dashboard() {
+  local session="${1:-$(caller_session)}" env_args=() window command
+  if dashboard_serving; then
+    echo "dashboard already serving on 127.0.0.1:${COORDINATOR_DASHBOARD_PORT:-47317}"
+    return 0
+  fi
+  mapfile -t env_args < <(passthrough_env_args)
+  command="bash $(printf %q "$SCRIPT_PATH") dashboard --serve; exec \${SHELL:-bash} -i"
+  if tmux has-session -t "=$session" 2>/dev/null; then
+    window="$(tmux new-window -d -P -F '#{window_id}' -t "=$session:" -n dashboard -c "$DEFAULT_REPO" "${env_args[@]}" "$command")"
+  else
+    window="$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n dashboard -c "$DEFAULT_REPO" "${env_args[@]}" "$command")"
+  fi
+  name_window "$window" dashboard
+  echo "dashboard: started in session $session ($window)"
+}
+
 cmd_dashboard() {
   local generator server
   [[ $PROFILE == "$PRIMARY_PROFILE" ]] || die "the dashboard serves every profile; run it without --profile"
@@ -559,6 +584,7 @@ cmd_dashboard() {
     --serve)
       DASHBOARD_REFRESH_SECONDS="$DASHBOARD_REFRESH_SECONDS" exec node "$server" "$STATE_DIR" "$DASHBOARD_FILE"
       ;;
+    --ensure) ensure_dashboard ;;
     --url) exec node "$server" --print-url "${2:-}" ;;
     --watch)
       echo "[agentctl] regenerating file://$DASHBOARD_FILE every ${DASHBOARD_REFRESH_SECONDS}s (ctrl-c to stop)"
@@ -567,7 +593,7 @@ cmd_dashboard() {
         sleep "$DASHBOARD_REFRESH_SECONDS"
       done
       ;;
-    *) die "usage: dashboard [--watch|--serve|--url [--tailnet]]" ;;
+    *) die "usage: dashboard [--watch|--serve|--ensure|--url [--tailnet]]" ;;
   esac
   [[ -z ${1:-} ]] && echo "file://$DASHBOARD_FILE"
   return 0
@@ -720,6 +746,10 @@ cmd_coordinator() {
     mark_coordinator_pane "$TMUX_PANE"
     [[ $PROFILE == "$PRIMARY_PROFILE" ]] || prepare_session_env "$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}')"
   fi
+  # The dashboard serves every profile and refuses --profile, so only the primary profile's launch starts it.
+  if [[ -n ${TMUX_PANE:-} && $PROFILE == "$PRIMARY_PROFILE" ]]; then
+    ensure_dashboard "$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}')" >&2 || true
+  fi
   cd "$DEFAULT_REPO"
   if [[ $HARNESS == codex ]]; then
     local prompt
@@ -838,13 +868,8 @@ cmd_up_profile() {
   echo "session=$session"
 }
 
-dashboard_serving() {
-  local port="${COORDINATOR_DASHBOARD_PORT:-47317}"
-  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
-}
-
 cmd_up() {
-  local attach=true output twism_session name env_args=()
+  local attach=true output twism_session name
   [[ ${1:-} == --no-attach ]] && attach=false
   [[ $PROFILE == "$PRIMARY_PROFILE" ]] || die "up starts every profile; run it without --profile"
   output="$(cmd_up_profile)"
@@ -854,16 +879,7 @@ cmd_up() {
     output="$(bash "$SCRIPT_PATH" --profile "$name" _up_profile)" || { echo "$name: up failed"; continue; }
     grep -v '^session=' <<<"$output"
   done < <(profile_names)
-  if dashboard_serving; then
-    echo "dashboard already serving on 127.0.0.1:${COORDINATOR_DASHBOARD_PORT:-47317}"
-  else
-    mapfile -t env_args < <(passthrough_env_args)
-    local window
-    window="$(tmux new-window -d -P -F '#{window_id}' -t "=$twism_session:" -n dashboard -c "$DEFAULT_REPO" "${env_args[@]}" \
-      "bash $(printf %q "$SCRIPT_PATH") dashboard --serve; exec \${SHELL:-bash} -i")"
-    name_window "$window" dashboard
-    echo "dashboard: started in session $twism_session ($window)"
-  fi
+  ensure_dashboard "$twism_session"
   echo "attach: tmux attach -t =$twism_session"
   $attach || return 0
   if [[ -n ${TMUX:-} ]]; then
