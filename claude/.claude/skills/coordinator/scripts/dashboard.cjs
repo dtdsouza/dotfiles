@@ -9,6 +9,7 @@ const ui = require('./dashboard-actions-ui.cjs');
 const { filesCss } = require('./dashboard-files-ui.cjs');
 const { spriteKind, spriteHtml, spriteDefsHtml, spriteCss } = require('./dashboard-sprites.cjs');
 const { PRIMARY_PROFILE, loadProfiles, taskKey } = require('./profiles.cjs');
+const { readReviews, reviewsHtml, reviewsCss } = require('./dashboard-reviews.cjs');
 
 const PAGE_RELOAD_SECONDS = 300;
 const STALE_ON_FOCUS_SECONDS = 60;
@@ -478,6 +479,7 @@ if (location.hash) openDrawer(decodeURIComponent(location.hash.slice(1)));
 
 const liveUrl = () => `http://127.0.0.1:${process.env.COORDINATOR_DASHBOARD_PORT || DEFAULT_PORT}/`;
 
+// options.reviews: mr-review-autoloop reviews waiting on a decision (readReviews()); omitted means none.
 // options.served = { csrf, nonce, closable, replyable, remote, files } for the page the local server sends;
 // without it the page is the read-only file:// copy. remote marks a page served through the tailnet.
 const render = (items, options = {}) => {
@@ -499,10 +501,11 @@ ${metaRefresh}
 ${faviconLink(items)}
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
-<style>${css}${ui.actionsCss}${spriteCss}${served && served.files ? filesCss : ''}</style>
+<style>${css}${ui.actionsCss}${spriteCss}${reviewsCss}${served && served.files ? filesCss : ''}</style>
 <script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body${served && served.remote ? ' class="remote"' : ''}>
 <div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}${filesButton}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
 ${spriteDefsHtml(items.map((a) => spriteKind({ status: a.status, live: a.win !== '-' })))}
+${reviewsHtml(options.reviews || [])}
 ${laned ? lanesHtml(items, profiles, served) : boardHtml(items, served, '')}
 <div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
 <script${nonce}>${clientScript(items, generatedAt, profiles)}${served ? ui.actionsClientScript(served.csrf, served.replyable) : ''}</script></body></html>`;
@@ -513,7 +516,7 @@ const writePage = (stateDir, out, options = {}) => {
   const profiles = loadProfiles({ primaryStateDir: stateDir });
   fs.mkdirSync(path.dirname(out), { recursive: true });
   try {
-    fs.writeFileSync(tmpFile, render(collectProfileItems(profiles), { ...options, profiles }));
+    fs.writeFileSync(tmpFile, render(collectProfileItems(profiles), { reviews: readReviews(), ...options, profiles }));
     fs.renameSync(tmpFile, out);
   } catch (err) {
     fs.rmSync(tmpFile, { force: true });
