@@ -15,7 +15,7 @@ const { loadFilePolicy } = require('./dashboard-files-policy.cjs');
 const { createArtifactIndex } = require('./dashboard-files-index.cjs');
 const { VIEW_PREFIX, createSigner, handleView } = require('./dashboard-files-serve.cjs');
 const { decorateItems, filesPageHtml } = require('./dashboard-files-ui.cjs');
-const { readReviews } = require('./dashboard-reviews.cjs');
+const { DEFAULT_DECIDE, approveReview, readReviews, reviewStatus, reviewsFile } = require('./dashboard-reviews.cjs');
 
 const HOST = '127.0.0.1';
 const COOKIE = 'agentctl_dashboard';
@@ -170,6 +170,7 @@ const ROUTES = {
     return actions.closeTaskTab(taskScope(context, profile), id);
   },
   '/api/tabs/close-done': (context, body) => actions.closeAllDoneTabs(taskScope(context, profileOf(context, body.profile))),
+  '/api/reviews/approve': (context, body) => approveReview(body, context.reviews),
 };
 
 // Typed text reaches a terminal, so whatever an action reports as typed is kept in a private log.
@@ -244,6 +245,19 @@ const handlePeek = async (req, res, context, readPane) => {
   }
 };
 
+// Not behind the peek limiter: the page polls this every couple of seconds after an approve, and it only reads two local files.
+const handleReviewStatus = (req, res, context) => {
+  const refusal = refuseRead(req, context);
+  if (refusal) return send(res, refusal[0], { ok: false, error: refusal[1], reload: refusal[0] === 403 && /token/.test(refusal[1]) });
+  const params = context.url.searchParams;
+  try {
+    return send(res, 200, { ok: true, ...reviewStatus({ ref: params.get('ref'), head_sha: params.get('head_sha') }, context.reviews) });
+  } catch (err) {
+    if (err instanceof actions.ActionError) return send(res, 400, { ok: false, error: err.message });
+    throw err;
+  }
+};
+
 const keyCookie = (key, secure) => `${COOKIE}=${key}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_SECONDS}${secure ? '; Secure' : ''}`;
 
 // Opening the list mints view links, so it takes the cookie and refuses a navigation that another
@@ -270,6 +284,7 @@ const handlePage = (req, res, context) => {
       return actions.peekTask(taskScope(context, profile), id);
     });
   }
+  if (context.url.pathname === '/api/reviews/status') return handleReviewStatus(req, res, context);
   if (context.url.pathname === '/api/coordinator/peek') {
     return handlePeek(req, res, context, async () =>
       actions.peekCoordinator(coordinatorScope(context, profileOf(context, context.url.searchParams.get('profile')))),
@@ -297,7 +312,7 @@ const handlePage = (req, res, context) => {
     const own = allItems.filter((item) => item.profile === profile.name);
     return context.files ? decorateItems(own, { stateDir: profile.stateDir, ...context.files, profile: profile.name }) : own;
   });
-  const html = render(items, { served, profiles: context.profiles, reviews: readReviews() });
+  const html = render(items, { served, profiles: context.profiles, reviews: readReviews(context.reviews.file) });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
 };
 
@@ -305,7 +320,8 @@ const handlePage = (req, res, context) => {
 const createFileViewer = (policy) => (policy ? { policy, signer: createSigner(), index: createArtifactIndex(policy) } : null);
 
 // tailnet = { host, logins } admits requests proxied by `tailscale serve`; null keeps it local-only.
-const createDashboardServer = ({ stateDir, profiles = null, key, tailnet = null, auditFile = defaultAuditFile(), files = null }) => {
+// reviews = { file, command }: the autoloop's pending.json and how to run its decide.py (tests pass a fake).
+const createDashboardServer = ({ stateDir, profiles = null, key, tailnet = null, auditFile = defaultAuditFile(), files = null, reviews = { file: reviewsFile(), command: ['python3', DEFAULT_DECIDE] } }) => {
   const knownProfiles = profiles || [{ name: PRIMARY_PROFILE, label: 'Twism', stateDir, session: '', harness: 'claude' }];
   const csrf = crypto.randomBytes(32).toString('base64url');
   const allowAction = createRateLimiter(RATE_MAX_ACTIONS);
@@ -324,6 +340,7 @@ const createDashboardServer = ({ stateDir, profiles = null, key, tailnet = null,
       allowPeek,
       auditFile,
       files,
+      reviews,
       url: new URL(req.url, `http://${HOST}:${port}`),
     };
     if (files && context.url.pathname.startsWith(VIEW_PREFIX) && (req.method === 'GET' || req.method === 'HEAD')) {

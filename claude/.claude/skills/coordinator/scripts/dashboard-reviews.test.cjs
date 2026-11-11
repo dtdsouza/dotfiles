@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { readReviews, reviewsFile, reviewsHtml } = require('./dashboard-reviews.cjs');
+const { readReviews, reviewStatus, reviewsFile, reviewsHtml } = require('./dashboard-reviews.cjs');
 const { render } = require('./dashboard.cjs');
 
 const NOW = Date.parse('2026-11-11T15:00:00Z');
@@ -81,6 +81,63 @@ describe('reviewsHtml', () => {
 
   test('marks a dry run', () => {
     assert.match(reviewsHtml([review({ dry_run: true })], NOW), /dry run/);
+  });
+});
+
+describe('approve button', () => {
+  test('only the served page gets one, pinned to the reviewed head sha', () => {
+    const r = review({ head_sha: 'dc816155f198034826fd76a714ff532c80acd616' });
+    assert.ok(!reviewsHtml([r], NOW).includes('data-approve'));
+    assert.match(reviewsHtml([r], NOW, { served: true }), /data-approve="platform\/monorepo!1188" data-sha="dc816155f198034826fd76a714ff532c80acd616"/);
+  });
+
+  test('no button without a usable head sha', () => {
+    assert.ok(!reviewsHtml([review({ head_sha: '"><b>' })], NOW, { served: true }).includes('data-approve'));
+  });
+});
+
+describe('reviewStatus', () => {
+  const SHA = 'dc816155f198034826fd76a714ff532c80acd616';
+  const REF = 'platform/monorepo!1231';
+  const setup = (status, logLines = []) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reviews-status-'));
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ runs: [
+      { ref: REF, head_sha: 'ffffffffffffffffffffffffffffffffffffffff', status: 'approved' },
+      { ref: REF, head_sha: SHA, status },
+    ] }));
+    fs.writeFileSync(path.join(dir, 'poll.log'), logLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
+    return { file: path.join(dir, 'pending.json') };
+  };
+
+  test('reports the run for that exact ref and head sha', () => {
+    assert.deepEqual(reviewStatus({ ref: REF, head_sha: SHA }, setup('posted')), { state: 'waiting' });
+    assert.deepEqual(reviewStatus({ ref: REF, head_sha: SHA }, setup('approved')), { state: 'approved' });
+    assert.deepEqual(reviewStatus({ ref: REF, head_sha: SHA }, setup('declined')), { state: 'declined' });
+  });
+
+  test('a failed approve carries the newest reason the poller logged for that ref', () => {
+    const where = setup('approve_failed', [
+      { event: 'approve-failed', ref: REF, reason: 'old reason' },
+      { event: 'approve-failed', ref: 'platform/monorepo!9', reason: 'other MR' },
+      { event: 'approve-failed', ref: REF, reason: 'HTTP 409: head moved' },
+      { event: 'tick', ref: REF },
+    ]);
+    assert.deepEqual(reviewStatus({ ref: REF, head_sha: SHA }, where), { state: 'failed', reason: 'HTTP 409: head moved' });
+  });
+
+  test('a failed approve without a log line still reports failed', () => {
+    assert.deepEqual(reviewStatus({ ref: REF, head_sha: SHA }, setup('approve_failed')), { state: 'failed', reason: '' });
+  });
+
+  test('an unknown run, or no state file, is unknown', () => {
+    assert.deepEqual(reviewStatus({ ref: 'platform/monorepo!9', head_sha: SHA }, setup('posted')), { state: 'unknown' });
+    assert.deepEqual(reviewStatus({ ref: REF, head_sha: SHA }, { file: path.join(os.tmpdir(), 'nowhere-' + process.pid, 'pending.json') }), { state: 'unknown' });
+  });
+
+  test('refuses a malformed ref or sha', () => {
+    for (const query of [{ ref: REF }, { ref: 'x; rm', head_sha: SHA }, { ref: REF, head_sha: 'zz' }]) {
+      assert.throws(() => reviewStatus(query, setup('posted')), /Name a waiting review/);
+    }
   });
 });
 
