@@ -464,6 +464,21 @@ read_task_fields() {
 
 stamp() { date '+%Y-%m-%d %H:%M'; }
 
+REVIEWS_FILE="${COORDINATOR_DASHBOARD_REVIEWS_FILE:-$HOME/.local/state/mr-review-autoloop/pending.json}"
+
+# mr-review-autoloop reviews waiting on the user's approve decision, one line each. The MR title is
+# left out on purpose: the MR author writes it, and this text lands in the coordinator's context.
+pending_review_lines() {
+  [[ $PROFILE == "$PRIMARY_PROFILE" && -r $REVIEWS_FILE ]] || return 0
+  jq -r '
+    def known($set): if (. as $v | $set | index($v)) then . else "UNKNOWN" end;
+    (.reviews // [])[]
+    | select((.ref | type) == "string" and (.ref | test("^[A-Za-z0-9._/-]+![0-9]+$")))
+    | "- \(.ref) (\(.tier | tostring | known(["T0","T1","T2","T3"])), verdict \(.verdict | tostring | known(["BLOCK_MERGE","REQUEST_CHANGES","APPROVE_WITH_NITS","APPROVE"]))\(if .dry_run then ", dry run" else "" end))"
+      + (if (.url | type) == "string" and (.url | test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[0-9]+$")) then " \(.url)" else "" end)
+  ' "$REVIEWS_FILE" 2>/dev/null || true
+}
+
 cmd_ls() {
   local include_archived=false
   if [[ ${1:-} == --all ]]; then include_archived=true; fi
@@ -478,6 +493,9 @@ cmd_ls() {
     if is_archived "$task_dir"; then state="archived"; fi
     printf "$format" "$id" "${TAB_WINDOW[$id]:--}" "$state" "${TAB_NAME[$id]:-$name}" "$model" "${workdir/#$HOME/~}"
   done < <(task_dirs "$include_archived")
+  local reviews
+  reviews="$(pending_review_lines)"
+  if [[ -n $reviews ]]; then printf '\nReviews waiting on you (mr-review-autoloop):\n%s\n' "$reviews"; fi
 }
 
 cmd_note() {
@@ -678,6 +696,14 @@ render_brief() {
   echo
   echo "## Active tasks (${#task_list[@]})"
   for task_dir in "${task_list[@]}"; do render_task "$task_dir"; done
+  local reviews
+  reviews="$(pending_review_lines)"
+  if [[ -n $reviews ]]; then
+    echo
+    echo "## MR reviews waiting on the user (mr-review-autoloop)"
+    echo "Record a decision only when the user's own message names the MR; see the coordinator skill."
+    printf '%s\n' "$reviews"
+  fi
 }
 
 cmd_brief() {
