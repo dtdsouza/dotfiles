@@ -505,7 +505,7 @@ ${faviconLink(items)}
 <script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body${served && served.remote ? ' class="remote"' : ''}>
 <div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}${filesButton}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
 ${spriteDefsHtml(items.map((a) => spriteKind({ status: a.status, live: a.win !== '-' })))}
-${reviewsHtml(options.reviews || [])}
+${reviewsHtml(options.reviews || [], Date.now(), { served: Boolean(served) })}
 ${laned ? lanesHtml(items, profiles, served) : boardHtml(items, served, '')}
 <div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
 <script${nonce}>${clientScript(items, generatedAt, profiles)}${served ? ui.actionsClientScript(served.csrf, served.replyable) : ''}</script></body></html>`;

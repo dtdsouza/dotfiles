@@ -85,10 +85,26 @@ before(async () => {
   writeTask(stateDir, { id: 'points-at-coordinator', name: 'x', ...coordinator, archivedAt });
   writeTask(stateDir, { id: 'stale-window', name: 'x', windowId: reused.windowId, paneId: '%999', archivedAt });
 
+  const autoloop = path.join(scratch, 'autoloop');
+  const reviewDir = path.join(autoloop, 'reviews', '159-1231', 'dc816155');
+  fs.mkdirSync(reviewDir, { recursive: true });
+  const outsideDir = tmpDir('agentctl-outside-');
+  const decideCalls = path.join(scratch, 'decide-calls.txt');
+  const fakeDecide = path.join(scratch, 'fake-decide.sh');
+  fs.writeFileSync(fakeDecide, `printf '%s\\n' "$*" >> ${JSON.stringify(decideCalls)}\necho "recorded: yes for platform/monorepo!1231 at dc816155 (the poller approves on its next tick)"\n`);
+  const reviewsFile = path.join(autoloop, 'pending.json');
+  fs.writeFileSync(reviewsFile, JSON.stringify({ generated_at: 'x', reviews: [
+    { ref: 'platform/monorepo!1231', iid: 1231, tier: 'T1', verdict: 'APPROVE_WITH_NITS', title: 'fix: wix', url: 'https://code.twism.info/platform/monorepo/-/merge_requests/1231', head_sha: 'dc816155f198034826fd76a714ff532c80acd616', dir: reviewDir, posted: { inline: 0, note: 0, local: 1 } },
+    { ref: 'platform/monorepo!66', iid: 66, tier: 'T1', verdict: 'APPROVE', title: 'elsewhere', url: 'https://code.twism.info/platform/monorepo/-/merge_requests/66', head_sha: 'aaaaaaaa11111111', dir: outsideDir },
+  ] }));
+
+  fs.writeFileSync(path.join(autoloop, 'state.json'), JSON.stringify({ runs: [{ ref: 'platform/monorepo!1231', head_sha: 'dc816155f198034826fd76a714ff532c80acd616', status: 'posted', dir: reviewDir }] }));
+
   // Without its own audit file the server would append these test messages to the user's real log.
-  const server = createDashboardServer({ stateDir, key: KEY, auditFile: path.join(scratch, 'audit.jsonl') });
+  const auditFile = path.join(scratch, 'audit.jsonl');
+  const server = createDashboardServer({ stateDir, key: KEY, auditFile, reviews: { file: reviewsFile, command: ['bash', fakeDecide] } });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  env = { server, port: server.address().port, stateDir, typed, coordinator, dashboard, done, working, doneToo, reused };
+  env = { server, port: server.address().port, stateDir, typed, coordinator, dashboard, done, working, doneToo, reused, decideCalls, reviewDir, auditFile };
   const page = await request({ headers: { Host: `127.0.0.1:${env.port}`, Cookie: `${COOKIE}=${KEY}` } });
   env.csrf = page.body.match(/const CSRF = "([^"]+)"/)[1];
   env.page = page;
@@ -248,6 +264,55 @@ describe('actions on the test tmux server', () => {
     const left = windowIds();
     assert.ok(!left.includes(env.doneToo.windowId));
     for (const kept of [env.coordinator, env.dashboard, env.working, env.reused]) assert.ok(left.includes(kept.windowId));
+  });
+});
+
+describe('approving a waiting review', () => {
+  const SHA = 'dc816155f198034826fd76a714ff532c80acd616';
+  const calls = () => (fs.existsSync(env.decideCalls) ? fs.readFileSync(env.decideCalls, 'utf8').trim().split('\n').filter(Boolean) : []);
+
+  test('the served page has an Approve button for each waiting review', () => {
+    assert.match(env.page.body, new RegExp(`data-approve="platform/monorepo!1231" data-sha="${SHA}"`));
+  });
+
+  test('a stale or unknown review is refused without recording anything', async () => {
+    for (const payload of [{ ref: 'platform/monorepo!1231', head_sha: 'ffffffff' }, { ref: 'platform/monorepo!9', head_sha: SHA }, { ref: 'platform/monorepo!1231' }, { ref: ['x'], head_sha: SHA }]) {
+      const res = await post('/api/reviews/approve', payload);
+      assert.equal(res.status, 409, JSON.stringify(payload));
+    }
+    assert.deepEqual(calls(), []);
+  });
+
+  test('a review whose dir is outside the autoloop state is refused', async () => {
+    const res = await post('/api/reviews/approve', { ref: 'platform/monorepo!66', head_sha: 'aaaaaaaa11111111' });
+    assert.equal(res.status, 409);
+    assert.deepEqual(calls(), []);
+  });
+
+  test('the gate still applies: no token, no approve', async () => {
+    const res = await post('/api/reviews/approve', { ref: 'platform/monorepo!1231', head_sha: SHA }, goodHeaders({ 'X-Dashboard-Token': 'nope' }));
+    assert.equal(res.status, 403);
+    assert.deepEqual(calls(), []);
+  });
+
+  test('records the approve for that exact review dir and audits it', async () => {
+    const res = await post('/api/reviews/approve', { ref: 'platform/monorepo!1231', head_sha: SHA });
+    assert.equal(res.status, 200, res.body);
+    assert.match(JSON.parse(res.body).message, /^recorded: yes for platform\/monorepo!1231/);
+    assert.deepEqual(calls(), [`answer ${env.reviewDir} yes`]);
+    const audit = fs.readFileSync(env.auditFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).pop();
+    assert.equal(audit.text, 'approve platform/monorepo!1231 at dc816155');
+  });
+
+  test('the page can poll the review status, behind the same read gate', async () => {
+    const urlPath = `/api/reviews/status?ref=${encodeURIComponent('platform/monorepo!1231')}&head_sha=${SHA}`;
+    const ok = await request({ urlPath, headers: goodHeaders() });
+    assert.equal(ok.status, 200, ok.body);
+    assert.deepEqual(ok.json(), { ok: true, state: 'waiting' });
+    const noToken = await request({ urlPath, headers: goodHeaders({ 'X-Dashboard-Token': 'nope' }) });
+    assert.equal(noToken.status, 403);
+    const bad = await request({ urlPath: '/api/reviews/status?ref=x', headers: goodHeaders() });
+    assert.equal(bad.status, 400);
   });
 });
 

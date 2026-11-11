@@ -3,6 +3,9 @@ const SERVED_RELOAD_SECONDS = 60;
 const CONFIRM_MS = 4000;
 const TOAST_MS = 3500;
 const PEEK_POLL_MS = 3000;
+const APPROVE_POLL_MS = 2000;
+// A tick normally lands within seconds of the approve; past this the timer's next tick picks it up.
+const APPROVE_WAIT_MS = 3 * 60 * 1000;
 const TAP_TARGET_PX = 44;
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -83,7 +86,7 @@ async function run(button, path, body, after) {
   try { toast(await act(path, body), true); if (after) after(); } catch (err) { toast(err.message, false); } finally { button.disabled = false; }
 }
 const typing = () => [...document.querySelectorAll('.msg input, .reply input')].some((i) => i === document.activeElement || i.value !== '');
-window.dashboardBusy = () => typing() || document.body.classList.contains('open') || !!document.querySelector('.armed');
+window.dashboardBusy = () => typing() || document.body.classList.contains('open') || !!document.querySelector('.armed, .rv.approving');
 const profileBody = (el, body) => (el && el.dataset.profile ? { ...body, profile: el.dataset.profile } : body);
 document.addEventListener('submit', (e) => {
   const form = e.target.closest('form.msg');
@@ -170,6 +173,65 @@ document.addEventListener('submit', (e) => {
   run(form.querySelector('button'), toCoordinator ? '/api/message' : '/api/reply', body, () => { input.value = ''; input.blur(); if (peekId === form.dataset.reply) setTimeout(refreshPeek, 600); });
 });
 const reloadSoon = () => setTimeout(reloadIfIdle, 1200);
+function showApproving(button, label) {
+  const spin = document.createElement('span');
+  spin.className = 'spin';
+  spin.setAttribute('aria-hidden', 'true');
+  button.replaceChildren(spin, document.createTextNode(label));
+}
+function removeReviewRow(row) {
+  const section = row.closest('.reviews');
+  row.classList.add('gone');
+  setTimeout(() => {
+    row.remove();
+    if (!section) return;
+    const left = section.querySelectorAll('.rv').length;
+    if (!left) return section.remove();
+    const count = section.querySelector('.count');
+    if (count) count.textContent = String(left);
+  }, 450);
+}
+async function reviewState(ref, sha) {
+  const res = await fetch('/api/reviews/status?ref=' + encodeURIComponent(ref) + '&head_sha=' + encodeURIComponent(sha), { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Dashboard-Token': CSRF } });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 403 && data.reload) throw new Error('The dashboard server restarted: reload the page.');
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Status check failed (HTTP ' + res.status + ').');
+  return data;
+}
+// The click only records the decision; the poller's tick sends it to GitLab, so the row stays until state.json says it landed.
+async function approveOnGitlab(button) {
+  const row = button.closest('.rv');
+  const ref = button.dataset.approve;
+  const sha = button.dataset.sha;
+  button.disabled = true;
+  row.classList.add('approving');
+  showApproving(button, 'Approving…');
+  try {
+    await act('/api/reviews/approve', { ref, head_sha: sha });
+  } catch (err) {
+    row.classList.remove('approving');
+    button.textContent = 'Approve';
+    button.disabled = false;
+    return toast(err.message, false);
+  }
+  toast('Approving ' + ref + ' on GitLab…', true);
+  const deadline = Date.now() + ${APPROVE_WAIT_MS};
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, ${APPROVE_POLL_MS}));
+    let data;
+    try { data = await reviewState(ref, sha); } catch (err) { if (/reload/.test(err.message)) { toast(err.message, false); break; } continue; }
+    if (data.state === 'approved') { toast('Approved ' + ref + ' on GitLab', true); return removeReviewRow(row); }
+    if (data.state === 'declined') return removeReviewRow(row);
+    if (data.state === 'failed') {
+      row.classList.remove('approving');
+      button.textContent = 'Approve failed';
+      return toast('GitLab did not take the approve for ' + ref + (data.reason ? ': ' + data.reason : '.'), false);
+    }
+  }
+  row.classList.remove('approving');
+  button.textContent = 'Approve recorded';
+  toast('Recorded; the poller approves ' + ref + ' on its next tick.', true);
+}
 document.addEventListener('click', (e) => {
   if (e.target.closest('.card form.reply')) { e.stopPropagation(); return; }
   const peekButton = e.target.closest('[data-peek]');
@@ -183,6 +245,8 @@ document.addEventListener('click', (e) => {
   if (coordinator) return openCoordinatorDrawer(coordinator.dataset.profile || '');
   const focus = e.target.closest('[data-act="focus"]');
   if (focus) return run(focus, '/api/coordinator/focus', profileBody(focus, {}));
+  const approve = e.target.closest('[data-approve]');
+  if (approve) { if (armed(approve, 'Confirm approve')) approveOnGitlab(approve); return; }
   const close = e.target.closest('[data-close]');
   if (close) { e.stopPropagation(); if (armed(close, 'Confirm close')) run(close, '/api/tabs/close', { id: close.dataset.close }, reloadSoon); return; }
   const all = e.target.closest('[data-close-all]');
