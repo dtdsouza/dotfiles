@@ -231,7 +231,6 @@ document.addEventListener('click', (e) => {
     refreshLoops();
   }).catch((err) => { toast(err.message, false); answer.disabled = false; });
 }, true);
-if (location.hash.startsWith('#draft')) openDraftDrawer(decodeURIComponent(location.hash.slice(1)));
 `;
 
 module.exports = { loopsCss, loopsScript };

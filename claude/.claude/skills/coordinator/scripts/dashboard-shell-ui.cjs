@@ -57,7 +57,7 @@ body.rail-open .rsec{border-top:0}body.rail-open .rsec span{display:block}
 .tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:5;border-top:1px solid var(--line);background:var(--surface);padding:4px 8px calc(4px + env(safe-area-inset-bottom))}
 .tabbar a{position:relative;flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;min-height:52px;justify-content:center;color:var(--muted);text-decoration:none;font:600 11px var(--body)}
 .tabbar a.on{color:var(--green-ink)}.tdot{position:absolute;top:8px;left:calc(50% + 6px);width:8px;height:8px;border-radius:50%;background:var(--blue-glow)}
-body.served{padding-bottom:72px}.toast{bottom:84px}}
+body.served{padding-bottom:72px}.toast{bottom:84px}body.open .tabbar{display:none}body.open .toast{bottom:96px}}
 `;
 
 // Routing is by hash: '' the board, #loops the loop list, #loop/<id> one loop. Drawer hashes
@@ -85,6 +85,8 @@ function applyRoute() {
   markNav(route);
   if (window.renderLoopRoute) window.renderLoopRoute(route);
   if (route.view !== 'board') window.scrollTo(0, 0);
+  const hash = decodeURIComponent(location.hash.slice(1));
+  if (hash.startsWith('draft/') && window.openDraftDrawer && !document.body.classList.contains('open')) window.openDraftDrawer(hash);
 }
 window.addEventListener('hashchange', applyRoute);
 applyRoute();
