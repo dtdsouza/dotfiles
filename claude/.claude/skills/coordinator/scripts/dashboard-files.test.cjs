@@ -407,8 +407,9 @@ describe('Files page and drawer', () => {
     assert.equal(items['task-a'].notesHtml, true);
   });
 
-  test('shows a Files button on the served page', () => {
-    assert.match(env.page.body, /<a class="btn quiet" href="\/files">Files<\/a>/);
+  test('links Files from the rail and the phone tab bar on the served page', () => {
+    assert.match(env.page.body, /<nav class="rail"[^]*<a class="ri" href="\/files"/);
+    assert.match(env.page.body, /<nav class="tabbar"[^]*<a href="\/files">/);
   });
 
   test('ships inline scripts that parse', async () => {

@@ -17,6 +17,8 @@ const { VIEW_PREFIX, createSigner, handleView } = require('./dashboard-files-ser
 const { decorateItems, filesPageHtml } = require('./dashboard-files-ui.cjs');
 const { DEFAULT_DECIDE, approveReview, readReviews, reviewStatus, reviewsFile, validTarget } = require('./dashboard-reviews.cjs');
 const { reviewDetail } = require('./dashboard-review-detail.cjs');
+const { loadLoops } = require('./loops-registry.cjs');
+const { createLoopsApi } = require('./loops-api.cjs');
 
 const HOST = '127.0.0.1';
 const COOKIE = 'agentctl_dashboard';
@@ -172,6 +174,14 @@ const ROUTES = {
   },
   '/api/tabs/close-done': (context, body) => actions.closeAllDoneTabs(taskScope(context, profileOf(context, body.profile))),
   '/api/reviews/approve': (context, body) => approveReview(body, context.reviews),
+  '/api/loops/action': (context, body) => loopsOf(context).loopAction(body, context),
+  '/api/loops/config': (context, body) => loopsOf(context).loopConfig(body, context),
+  '/api/loops/decide': (context, body) => loopsOf(context).loopDecide(body, context),
+};
+
+const loopsOf = (context) => {
+  if (!context.loops) throw new actions.ActionError('No loops are configured.');
+  return context.loops;
 };
 
 // Typed text reaches a terminal, so whatever an action reports as typed is kept in a private log.
@@ -201,7 +211,6 @@ const handleAction = async (req, res, context) => {
   if (!route) return send(res, 404, { ok: false, error: 'Unknown action.' });
   const refusal = refuseAction(req, context);
   if (refusal) return send(res, refusal[0], { ok: false, error: refusal[1], reload: refusal[0] === 403 && /token/.test(refusal[1]) });
-  if (!context.allowAction()) return send(res, 429, { ok: false, error: 'Too many actions; wait a minute.' });
   let body;
   try {
     body = JSON.parse((await readBody(req)) || '{}');
@@ -209,6 +218,8 @@ const handleAction = async (req, res, context) => {
     return send(res, err.status || 400, { ok: false, error: err.status === 413 ? 'Message too large.' : 'Invalid JSON.' });
   }
   if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { ok: false, error: 'Invalid JSON.' });
+  const exempt = context.url.pathname === '/api/loops/action' && context.loops && context.loops.exemptFromLimit(body);
+  if (!context.allowAction() && !exempt) return send(res, 429, { ok: false, error: 'Too many actions; wait a minute.' });
   try {
     const result = await route(context, body);
     auditTyped(context, result);
@@ -275,6 +286,24 @@ const handleReviewDetail = (req, res, context) => {
   }
 };
 
+const LOOP_READS = {
+  '/api/loops': (loops) => loops.listLoops().then((list) => ({ loops: list })),
+  '/api/loops/status': (loops, params) => loops.loopStatus(params.get('loop')),
+  '/api/loops/draft': (loops, params) => loops.loopDraft({ loop: params.get('loop'), id: params.get('id') }),
+};
+
+const handleLoopRead = async (req, res, context, read) => {
+  const refusal = refuseRead(req, context);
+  if (refusal) return send(res, refusal[0], { ok: false, error: refusal[1], reload: refusal[0] === 403 && /token/.test(refusal[1]) });
+  if (!context.allowPeek()) return send(res, 429, { ok: false, error: 'Too many refreshes; wait a minute.' });
+  try {
+    return send(res, 200, { ok: true, ...(await read(loopsOf(context), context.url.searchParams)) });
+  } catch (err) {
+    if (err instanceof actions.ActionError) return send(res, 409, { ok: false, error: err.message });
+    throw err;
+  }
+};
+
 const keyCookie = (key, secure) => `${COOKIE}=${key}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_SECONDS}${secure ? '; Secure' : ''}`;
 
 // Opening the list mints view links, so it takes the cookie and refuses a navigation that another
@@ -301,6 +330,7 @@ const handlePage = (req, res, context) => {
       return actions.peekTask(taskScope(context, profile), id);
     });
   }
+  if (LOOP_READS[context.url.pathname]) return handleLoopRead(req, res, context, LOOP_READS[context.url.pathname]);
   if (context.url.pathname === '/api/reviews/status') return handleReviewStatus(req, res, context);
   if (context.url.pathname === '/api/reviews/detail') return handleReviewDetail(req, res, context);
   if (context.url.pathname === '/api/coordinator/peek') {
@@ -330,7 +360,9 @@ const handlePage = (req, res, context) => {
     const own = allItems.filter((item) => item.profile === profile.name);
     return context.files ? decorateItems(own, { stateDir: profile.stateDir, ...context.files, profile: profile.name }) : own;
   });
-  const html = render(items, { served, profiles: context.profiles, reviews: readReviews(context.reviews.file) });
+  const loops = context.loops ? context.loops.loops.map((l) => ({ id: l.id, name: l.name, icon: l.icon })) : [];
+  const drafts = context.loops ? context.loops.allDrafts().map(({ loop, draft }) => ({ loop: loop.id, draft })) : [];
+  const html = render(items, { served: { ...served, loops }, profiles: context.profiles, reviews: readReviews(context.reviews.file), drafts });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
 };
 
@@ -339,7 +371,8 @@ const createFileViewer = (policy) => (policy ? { policy, signer: createSigner(),
 
 // tailnet = { host, logins } admits requests proxied by `tailscale serve`; null keeps it local-only.
 // reviews = { file, command }: the autoloop's pending.json and how to run its decide.py (tests pass a fake).
-const createDashboardServer = ({ stateDir, profiles = null, key, tailnet = null, auditFile = defaultAuditFile(), files = null, reviews = { file: reviewsFile(), command: ['python3', DEFAULT_DECIDE] } }) => {
+// loops: createLoopsApi() over the manifests loaded at start; null hides the Loops area.
+const createDashboardServer = ({ stateDir, profiles = null, key, tailnet = null, auditFile = defaultAuditFile(), files = null, reviews = { file: reviewsFile(), command: ['python3', DEFAULT_DECIDE] }, loops = null }) => {
   const knownProfiles = profiles || [{ name: PRIMARY_PROFILE, label: 'Twism', stateDir, session: '', harness: 'claude' }];
   const csrf = crypto.randomBytes(32).toString('base64url');
   const allowAction = createRateLimiter(RATE_MAX_ACTIONS);
@@ -359,6 +392,7 @@ const createDashboardServer = ({ stateDir, profiles = null, key, tailnet = null,
       auditFile,
       files,
       reviews,
+      loops,
       url: new URL(req.url, `http://${HOST}:${port}`),
     };
     if (files && context.url.pathname.startsWith(VIEW_PREFIX) && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -401,7 +435,11 @@ const main = () => {
   const tailnet = loadTailnetConfig();
   const profiles = loadProfiles({ primaryStateDir: stateDir });
   const policy = loadFilePolicy(process.env, os.homedir(), profiles);
-  const server = createDashboardServer({ stateDir, profiles, key, tailnet, files: createFileViewer(policy) });
+  const registry = loadLoops();
+  registry.errors.forEach((e) => console.error(`[dashboard] loop manifest skipped: ${e}`));
+  const auditFile = defaultAuditFile();
+  const loops = registry.loops.length ? createLoopsApi({ loops: registry.loops, auditFile, appendAudit }) : null;
+  const server = createDashboardServer({ stateDir, profiles, key, tailnet, auditFile, files: createFileViewer(policy), loops });
   const regenerate = () => {
     try {
       writePage(stateDir, out);
@@ -428,10 +466,11 @@ const main = () => {
         ? `[dashboard] file viewer on for ${policy.roots.map((r) => r.pattern).join(', ')}`
         : '[dashboard] file viewer off (COORDINATOR_DASHBOARD_FILE_ROOTS=off or no usable root)',
     );
+    console.log(`[dashboard] loops: ${registry.loops.length ? registry.loops.map((l) => l.id).join(', ') : 'none (no manifest in ~/.config/agentctl/loops)'}`);
     console.log(`[dashboard] also regenerating file://${out} every ${refreshSeconds}s; ctrl-c to stop`);
   });
 };
 
-module.exports = { COOKIE, MAX_BODY_BYTES, createDashboardServer, createFileViewer, loadOrCreateKey, urlWithKey };
+module.exports = { COOKIE, MAX_BODY_BYTES, appendAudit, createDashboardServer, createFileViewer, loadOrCreateKey, urlWithKey };
 
 if (require.main === module) main();

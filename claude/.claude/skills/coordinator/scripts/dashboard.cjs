@@ -12,6 +12,9 @@ const { PRIMARY_PROFILE, loadProfiles, taskKey } = require('./profiles.cjs');
 const { readReviews, reviewCardHtml, reviewsCss } = require('./dashboard-reviews.cjs');
 const { reviewDrawerCss, reviewDrawerScript } = require('./dashboard-review-ui.cjs');
 const { JIRA_BOARD_URL, JIRA_BROWSE, jiraCss, ticketsOf, ticketTagsHtml } = require('./dashboard-jira.cjs');
+const { railHtml, tabBarHtml, shellCss, shellScript } = require('./dashboard-shell-ui.cjs');
+const { loopsCss, loopsScript } = require('./dashboard-loops-ui.cjs');
+const { draftCardHtml, draftsCss } = require('./loops-drafts.cjs');
 
 const PAGE_RELOAD_SECONDS = 300;
 const STALE_ON_FOCUS_SECONDS = 60;
@@ -300,14 +303,17 @@ const FILTERS_HTML = `<div class="filters"><button class="chip" data-range="toda
 <div class="custom" hidden><input type="date" data-from> <span>to</span> <input type="date" data-to></div></div><div class="empty" hidden>No sessions in this range.</div>`;
 
 // reviews: mr-review-autoloop reviews waiting on a decision, shown after the workers' asks in Needs you.
-const columnHtml = (items, [title, dotClass, status], served, profile = '', reviews = []) => {
+// drafts: loop drafts ({ loop, draft }) waiting on approval, shown after the reviews.
+const columnHtml = (items, [title, dotClass, status], served, profile = '', reviews = [], drafts = []) => {
   const list = items.filter((a) => a.status === status);
   const shownReviews = status === 'review' ? reviews : [];
-  const total = list.length + shownReviews.length;
+  const shownDrafts = status === 'review' ? drafts : [];
+  const total = list.length + shownReviews.length + shownDrafts.length;
   const filters = status === 'done' ? FILTERS_HTML : '';
   const closeAll = served && status === 'done' ? ui.closeAllButtonHtml(list.filter((a) => served.closable.has(a.key)).length, profile) : '';
   const reviewCards = shownReviews.map((r) => reviewCardHtml(r, Date.now(), { served: Boolean(served), profile: profile || PRIMARY_PROFILE })).join('');
-  return `<div class="col" data-status="${status}"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count" data-total="${total}">${total}</span>${closeAll}</div>${filters}${list.map((a) => cardHtml(a, served)).join('')}${reviewCards}</div>`;
+  const draftCards = shownDrafts.map(({ loop, draft }) => draftCardHtml(loop, draft, { served: Boolean(served), profile: profile || PRIMARY_PROFILE })).join('');
+  return `<div class="col" data-status="${status}"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count" data-total="${total}">${total}</span>${closeAll}</div>${filters}${list.map((a) => cardHtml(a, served)).join('')}${reviewCards}${draftCards}</div>`;
 };
 
 const COLUMNS = [
@@ -317,7 +323,7 @@ const COLUMNS = [
   ['Done', 's-done', 'done'],
 ];
 
-const boardHtml = (items, served, profile, reviews = []) => `<div class="board">${COLUMNS.map((c) => columnHtml(items, c, served, profile, reviews)).join('')}</div>`;
+const boardHtml = (items, served, profile, reviews = [], drafts = []) => `<div class="board">${COLUMNS.map((c) => columnHtml(items, c, served, profile, reviews, drafts)).join('')}</div>`;
 
 const LANE_SUMMARY = [
   ['review', 'needs you', 'need you'],
@@ -325,25 +331,26 @@ const LANE_SUMMARY = [
   ['working', 'working', 'working'],
 ];
 
-const laneSummary = (items, reviewCount = 0) =>
-  [...LANE_SUMMARY.map(([status, one, many]) => [items.filter((a) => a.status === status).length, one, many]), [reviewCount, 'review', 'reviews']]
+const laneSummary = (items, reviewCount = 0, draftCount = 0) =>
+  [...LANE_SUMMARY.map(([status, one, many]) => [items.filter((a) => a.status === status).length, one, many]), [reviewCount, 'review', 'reviews'], [draftCount, 'draft', 'drafts']]
     .filter(([count]) => count > 0)
     .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`)
     .join(' · ') || 'nothing open';
 
 // Option 3 of the two-coordinator review: one swimlane per profile, each with its own coordinator
 // console. A lane collapses to its header (summary and console stay), remembered per browser.
-const lanesHtml = (items, profiles, served, reviews = []) => {
+const lanesHtml = (items, profiles, served, reviews = [], drafts = []) => {
   const reviewLane = (profiles.find((p) => p.name === PRIMARY_PROFILE) || profiles[0]).name;
   return profiles
     .map((p, index) => {
       const mine = items.filter((a) => a.profile === p.name);
       const myReviews = p.name === reviewLane ? reviews : [];
+      const myDrafts = p.name === reviewLane ? drafts : [];
       const where = `${p.session ? `tmux session ${p.session} · ` : ''}${p.harness} · ledger ${p.stateDir.replace(process.env.HOME || '\0', '~')}`;
       const consoleHtml = served ? ui.laneActionsHtml(p.name, p.label) : '';
       const toggle = `<button class="lanetoggle" type="button" data-lane-toggle="${esc(p.name)}" aria-expanded="true" title="Collapse or expand the ${esc(p.label)} lane">▾</button>`;
-      const summary = `<span class="lanesum" data-lane-sum="${esc(p.name)}">${esc(laneSummary(mine, myReviews.length))}</span>`;
-      return `<section class="lane" data-profile="${esc(p.name)}"><div class="lanehead"><div class="lanetitle">${toggle}<span class="prof p${Math.min(index, 1)}">${esc(p.label)}</span><h2>${esc(p.label)}</h2><span class="meta">${esc(where)}</span>${summary}</div>${consoleHtml}</div>${boardHtml(mine, served, p.name, myReviews)}</section>`;
+      const summary = `<span class="lanesum" data-lane-sum="${esc(p.name)}">${esc(laneSummary(mine, myReviews.length, myDrafts.length))}</span>`;
+      return `<section class="lane" data-profile="${esc(p.name)}"><div class="lanehead"><div class="lanetitle">${toggle}<span class="prof p${Math.min(index, 1)}">${esc(p.label)}</span><h2>${esc(p.label)}</h2><span class="meta">${esc(where)}</span>${summary}</div>${consoleHtml}</div>${boardHtml(mine, served, p.name, myReviews, myDrafts)}</section>`;
     })
     .join('');
 };
@@ -364,6 +371,7 @@ const KIND_LABEL = { html: 'HTML', video: 'Video', pdf: 'PDF', image: 'Image', s
 const fileRowHtml = (f) => '<div class="frow"><div class="top"><span class="tag">' + esc(KIND_LABEL[f.kind] || f.kind) + '</span><a class="flink" href="' + esc(f.href) + '" target="_blank" rel="noopener noreferrer">' + esc(f.name) + '</a><span class="age">' + esc(f.age) + '</span></div><div class="where">' + esc(f.dir) + '</div></div>';
 function openDrawer(id) {
   if (id.startsWith('review/')) { if (window.openReviewDrawer) window.openReviewDrawer(id); return; }
+  if (id.startsWith('draft/')) { if (window.openDraftDrawer) window.openDraftDrawer(id); return; }
   const a = ITEMS[id]; if (!a) return;
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('sel', c.dataset.id === id));
   const live = a.win !== '-';
@@ -510,7 +518,12 @@ const render = (items, options = {}) => {
   const metaRefresh = served ? '' : `<meta http-equiv="refresh" content="${PAGE_RELOAD_SECONDS}">`;
   const refreshHref = served ? '/' : 'tmuxjump://refresh';
   const actions = served ? (laned ? '' : ui.headerActionsHtml) : ui.readOnlyHintHtml(liveUrl());
-  const filesButton = served && served.files ? '<a class="btn quiet" href="/files">Files</a>' : '';
+  const shell = Boolean(served);
+  const loops = (served && served.loops) || [];
+  const drafts = served ? options.drafts || [] : [];
+  const filesButton = served && served.files && !shell ? '<a class="btn quiet" href="/files">Files</a>' : '';
+  const needsYou = items.filter((a) => a.status === 'review' || a.status === 'blocked').length + (options.reviews || []).length + drafts.length;
+  const board = laned ? lanesHtml(items, profiles, served, options.reviews || [], drafts) : boardHtml(items, served, '', options.reviews || [], drafts);
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 ${metaRefresh}
@@ -518,13 +531,14 @@ ${metaRefresh}
 ${faviconLink(items)}
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
-<style>${css}${ui.actionsCss}${spriteCss}${reviewsCss}${jiraCss}${served ? reviewDrawerCss : ''}${served && served.files ? filesCss : ''}</style>
-<script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body${served && served.remote ? ' class="remote"' : ''}>
+<style>${css}${ui.actionsCss}${spriteCss}${reviewsCss}${jiraCss}${served ? reviewDrawerCss + shellCss + loopsCss + draftsCss : ''}${served && served.files ? filesCss : ''}</style>
+<script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body${served ? ` class="served${served.remote ? ' remote' : ''}"` : ''}>
+${shell ? `<div class="shell">${railHtml({ loops, files: Boolean(served.files), needsYou })}<div class="main">` : ''}
 <div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}${filesButton}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
 ${spriteDefsHtml(items.map((a) => spriteKind({ status: a.status, live: a.win !== '-' })))}
-${laned ? lanesHtml(items, profiles, served, options.reviews || []) : boardHtml(items, served, '', options.reviews || [])}
+${shell ? `<div class="boardarea">${board}</div><section class="loopview" hidden></section></div></div>${tabBarHtml({ loops, files: Boolean(served.files) })}` : board}
 <div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
-<script${nonce}>${clientScript(items, generatedAt, profiles)}${served ? ui.actionsClientScript(served.csrf, served.replyable) + reviewDrawerScript : ''}</script></body></html>`;
+<script${nonce}>${clientScript(items, generatedAt, profiles)}${served ? ui.actionsClientScript(served.csrf, served.replyable) + reviewDrawerScript + loopsScript + shellScript : ''}</script></body></html>`;
 };
 
 const writePage = (stateDir, out, options = {}) => {
