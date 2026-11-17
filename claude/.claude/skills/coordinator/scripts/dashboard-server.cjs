@@ -15,7 +15,8 @@ const { loadFilePolicy } = require('./dashboard-files-policy.cjs');
 const { createArtifactIndex } = require('./dashboard-files-index.cjs');
 const { VIEW_PREFIX, createSigner, handleView } = require('./dashboard-files-serve.cjs');
 const { decorateItems, filesPageHtml } = require('./dashboard-files-ui.cjs');
-const { DEFAULT_DECIDE, approveReview, readReviews, reviewStatus, reviewsFile } = require('./dashboard-reviews.cjs');
+const { DEFAULT_DECIDE, approveReview, readReviews, reviewStatus, reviewsFile, validTarget } = require('./dashboard-reviews.cjs');
+const { reviewDetail } = require('./dashboard-review-detail.cjs');
 
 const HOST = '127.0.0.1';
 const COOKIE = 'agentctl_dashboard';
@@ -258,6 +259,22 @@ const handleReviewStatus = (req, res, context) => {
   }
 };
 
+// The review panel reads a dozen local files per open, so it shares the peek budget.
+const handleReviewDetail = (req, res, context) => {
+  const refusal = refuseRead(req, context);
+  if (refusal) return send(res, refusal[0], { ok: false, error: refusal[1], reload: refusal[0] === 403 && /token/.test(refusal[1]) });
+  if (!context.allowPeek()) return send(res, 429, { ok: false, error: 'Too many refreshes; wait a minute.' });
+  const params = context.url.searchParams;
+  const query = { ref: params.get('ref'), head_sha: params.get('head_sha') };
+  if (!validTarget(query)) return send(res, 400, { ok: false, error: 'Name a waiting review and its head sha.' });
+  try {
+    return send(res, 200, { ok: true, ...reviewDetail(query, context.reviews) });
+  } catch (err) {
+    if (err instanceof actions.ActionError) return send(res, 409, { ok: false, error: err.message });
+    throw err;
+  }
+};
+
 const keyCookie = (key, secure) => `${COOKIE}=${key}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_SECONDS}${secure ? '; Secure' : ''}`;
 
 // Opening the list mints view links, so it takes the cookie and refuses a navigation that another
@@ -285,6 +302,7 @@ const handlePage = (req, res, context) => {
     });
   }
   if (context.url.pathname === '/api/reviews/status') return handleReviewStatus(req, res, context);
+  if (context.url.pathname === '/api/reviews/detail') return handleReviewDetail(req, res, context);
   if (context.url.pathname === '/api/coordinator/peek') {
     return handlePeek(req, res, context, async () =>
       actions.peekCoordinator(coordinatorScope(context, profileOf(context, context.url.searchParams.get('profile')))),

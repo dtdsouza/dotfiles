@@ -9,7 +9,9 @@ const ui = require('./dashboard-actions-ui.cjs');
 const { filesCss } = require('./dashboard-files-ui.cjs');
 const { spriteKind, spriteHtml, spriteDefsHtml, spriteCss } = require('./dashboard-sprites.cjs');
 const { PRIMARY_PROFILE, loadProfiles, taskKey } = require('./profiles.cjs');
-const { readReviews, reviewsHtml, reviewsCss } = require('./dashboard-reviews.cjs');
+const { readReviews, reviewCardHtml, reviewsCss } = require('./dashboard-reviews.cjs');
+const { reviewDrawerCss, reviewDrawerScript } = require('./dashboard-review-ui.cjs');
+const { JIRA_BOARD_URL, JIRA_BROWSE, jiraCss, ticketsOf, ticketTagsHtml } = require('./dashboard-jira.cjs');
 
 const PAGE_RELOAD_SECONDS = 300;
 const STALE_ON_FOCUS_SECONDS = 60;
@@ -129,7 +131,7 @@ const collectItems = (stateDir, { profile = PRIMARY_PROFILE, sessionProfiles = n
   const tabs = matchTaskTabs(tasks.map((t) => t.meta), panes, { profile, sessionProfiles });
   return tasks
     .filter((t) => t.meta.id && (!t.meta.archivedAt || tabs.has(t.meta.id) || isRecent(t.meta.archivedAt)))
-    .map((t) => buildItem(t, tabs.get(t.meta.id)))
+    .map((t) => ({ ...buildItem(t, tabs.get(t.meta.id)), tickets: ticketsOf(t.meta, profile) }))
     .sort((a, b) => b.updated - a.updated);
 };
 
@@ -250,7 +252,7 @@ pre{background:var(--surface);border:1px solid var(--line);border-radius:16px;pa
 .seg button{flex:1;border:0;border-radius:999px;padding:8px 0;font:600 13px var(--body);color:var(--text);background:transparent;cursor:pointer}
 .seg button.on{background:var(--green-12);color:var(--fg);box-shadow:inset 0 0 0 1px var(--green-30)}
 .coordrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:12px}
-.coordrow button{border:1px solid var(--line);border-radius:18px;padding:10px 12px;background:var(--soft);color:var(--fg);font:500 13px var(--body);text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.coordrow button,.coordrow a{border:1px solid var(--line);border-radius:18px;padding:10px 12px;background:var(--soft);color:var(--fg);font:500 13px var(--body);text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:6px;align-items:flex-start}.coordrow a{text-decoration:none}
 .feed{padding:4px 16px 24px}.sec{font:600 11px var(--body);color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:18px 2px 10px}
 @media (max-width:640px){.lane{margin:0 16px}}`;
 
@@ -278,7 +280,10 @@ const cardHtml = (a, served) => {
   const goal = a.goal ? `<div class="goal">${esc(a.goal)}</div>` : '';
   const note = a.summary ? `<div class="${a.status === 'review' || a.status === 'blocked' ? 'q' : 'line'}">${esc(trimNote(a.summary))}</div>` : '';
   const liveTag = a.status === 'done' ? '<span class="tag live">tab open</span>' : '';
-  const meta = live ? `<div class="row">${liveTag}<span class="tag${modelClass(a.model)}">${esc(a.model)}</span><span class="tag">${esc(a.effort)}</span></div>${a.ctxMeter}` : '';
+  const tickets = ticketTagsHtml(a.tickets || []);
+  const meta = live
+    ? `<div class="row">${tickets}${liveTag}<span class="tag${modelClass(a.model)}">${esc(a.model)}</span><span class="tag">${esc(a.effort)}</span></div>${a.ctxMeter}`
+    : tickets ? `<div class="row">${tickets}</div>` : '';
   const wid = live ? `<span class="wid">${esc(a.win)}</span>` : '';
   const jump = jumpCommand(a);
   const copy = `<button class="mini desktop-only" data-copy="${esc(jump)}" title="${esc(jump)}">${live ? 'Copy jump' : 'Copy resume'}</button>`;
@@ -294,11 +299,15 @@ const cardHtml = (a, served) => {
 const FILTERS_HTML = `<div class="filters"><button class="chip" data-range="today">Today</button><button class="chip" data-range="7">7 days</button><button class="chip" data-range="30">30 days</button><button class="chip" data-range="all">All</button><button class="chip" data-range="custom">Custom</button>
 <div class="custom" hidden><input type="date" data-from> <span>to</span> <input type="date" data-to></div></div><div class="empty" hidden>No sessions in this range.</div>`;
 
-const columnHtml = (items, [title, dotClass, status], served, profile = '') => {
+// reviews: mr-review-autoloop reviews waiting on a decision, shown after the workers' asks in Needs you.
+const columnHtml = (items, [title, dotClass, status], served, profile = '', reviews = []) => {
   const list = items.filter((a) => a.status === status);
+  const shownReviews = status === 'review' ? reviews : [];
+  const total = list.length + shownReviews.length;
   const filters = status === 'done' ? FILTERS_HTML : '';
   const closeAll = served && status === 'done' ? ui.closeAllButtonHtml(list.filter((a) => served.closable.has(a.key)).length, profile) : '';
-  return `<div class="col" data-status="${status}"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count" data-total="${list.length}">${list.length}</span>${closeAll}</div>${filters}${list.map((a) => cardHtml(a, served)).join('')}</div>`;
+  const reviewCards = shownReviews.map((r) => reviewCardHtml(r, Date.now(), { served: Boolean(served), profile: profile || PRIMARY_PROFILE })).join('');
+  return `<div class="col" data-status="${status}"><div class="colhead"><span class="dot ${dotClass}"></span><h2>${title}</h2><span class="count" data-total="${total}">${total}</span>${closeAll}</div>${filters}${list.map((a) => cardHtml(a, served)).join('')}${reviewCards}</div>`;
 };
 
 const COLUMNS = [
@@ -308,7 +317,7 @@ const COLUMNS = [
   ['Done', 's-done', 'done'],
 ];
 
-const boardHtml = (items, served, profile) => `<div class="board">${COLUMNS.map((c) => columnHtml(items, c, served, profile)).join('')}</div>`;
+const boardHtml = (items, served, profile, reviews = []) => `<div class="board">${COLUMNS.map((c) => columnHtml(items, c, served, profile, reviews)).join('')}</div>`;
 
 const LANE_SUMMARY = [
   ['review', 'needs you', 'need you'],
@@ -316,25 +325,28 @@ const LANE_SUMMARY = [
   ['working', 'working', 'working'],
 ];
 
-const laneSummary = (items) =>
-  LANE_SUMMARY.map(([status, one, many]) => [items.filter((a) => a.status === status).length, one, many])
+const laneSummary = (items, reviewCount = 0) =>
+  [...LANE_SUMMARY.map(([status, one, many]) => [items.filter((a) => a.status === status).length, one, many]), [reviewCount, 'review', 'reviews']]
     .filter(([count]) => count > 0)
     .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`)
     .join(' · ') || 'nothing open';
 
 // Option 3 of the two-coordinator review: one swimlane per profile, each with its own coordinator
 // console. A lane collapses to its header (summary and console stay), remembered per browser.
-const lanesHtml = (items, profiles, served) =>
-  profiles
+const lanesHtml = (items, profiles, served, reviews = []) => {
+  const reviewLane = (profiles.find((p) => p.name === PRIMARY_PROFILE) || profiles[0]).name;
+  return profiles
     .map((p, index) => {
       const mine = items.filter((a) => a.profile === p.name);
+      const myReviews = p.name === reviewLane ? reviews : [];
       const where = `${p.session ? `tmux session ${p.session} · ` : ''}${p.harness} · ledger ${p.stateDir.replace(process.env.HOME || '\0', '~')}`;
       const consoleHtml = served ? ui.laneActionsHtml(p.name, p.label) : '';
       const toggle = `<button class="lanetoggle" type="button" data-lane-toggle="${esc(p.name)}" aria-expanded="true" title="Collapse or expand the ${esc(p.label)} lane">▾</button>`;
-      const summary = `<span class="lanesum" data-lane-sum="${esc(p.name)}">${esc(laneSummary(mine))}</span>`;
-      return `<section class="lane" data-profile="${esc(p.name)}"><div class="lanehead"><div class="lanetitle">${toggle}<span class="prof p${Math.min(index, 1)}">${esc(p.label)}</span><h2>${esc(p.label)}</h2><span class="meta">${esc(where)}</span>${summary}</div>${consoleHtml}</div>${boardHtml(mine, served, p.name)}</section>`;
+      const summary = `<span class="lanesum" data-lane-sum="${esc(p.name)}">${esc(laneSummary(mine, myReviews.length))}</span>`;
+      return `<section class="lane" data-profile="${esc(p.name)}"><div class="lanehead"><div class="lanetitle">${toggle}<span class="prof p${Math.min(index, 1)}">${esc(p.label)}</span><h2>${esc(p.label)}</h2><span class="meta">${esc(where)}</span>${summary}</div>${consoleHtml}</div>${boardHtml(mine, served, p.name, myReviews)}</section>`;
     })
     .join('');
+};
 
 const clientScript = (items, generatedAt, profiles = []) => `
 const ITEMS = ${JSON.stringify(Object.fromEntries(items.map((a) => [a.key, a]))).replace(/</g, '\\u003c')};
@@ -343,12 +355,15 @@ const GENERATED_AT = ${JSON.stringify(generatedAt)};
 const GENERATED_MS = ${Date.now()};
 const STALE_MS = ${STALE_ON_FOCUS_SECONDS * 1000};
 const LABEL = { working: 'working', review: 'needs you', blocked: 'blocked', done: 'done' };
+const JIRA_BROWSE = ${JSON.stringify(JIRA_BROWSE)};
+const JIRA_BOARD = ${JSON.stringify(JIRA_BOARD_URL)};
 const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const snapshotLine = (l) => l.trimStart().startsWith('❯') ? '<span class="ghost">' + esc(l) + '  ← prompt line: may be a ghost suggestion</span>' : esc(l);
 const drawer = document.querySelector('.drawer');
 const KIND_LABEL = { html: 'HTML', video: 'Video', pdf: 'PDF', image: 'Image', svg: 'Image', text: 'Text' };
 const fileRowHtml = (f) => '<div class="frow"><div class="top"><span class="tag">' + esc(KIND_LABEL[f.kind] || f.kind) + '</span><a class="flink" href="' + esc(f.href) + '" target="_blank" rel="noopener noreferrer">' + esc(f.name) + '</a><span class="age">' + esc(f.age) + '</span></div><div class="where">' + esc(f.dir) + '</div></div>';
 function openDrawer(id) {
+  if (id.startsWith('review/')) { if (window.openReviewDrawer) window.openReviewDrawer(id); return; }
   const a = ITEMS[id]; if (!a) return;
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('sel', c.dataset.id === id));
   const live = a.win !== '-';
@@ -361,7 +376,7 @@ function openDrawer(id) {
     <div class="dhead"><span class="pill"><span class="dot s-\${a.status}"></span>\${LABEL[a.status]}\${a.win !== '-' ? ' \\u00b7 ' + esc(a.win) + ' \\u00b7 ' + esc(a.pane) : ''}</span><button class="x" title="Close (Esc)">\\u2715</button></div>
     <h2>\${esc(a.tab)}</h2>\${a.goal ? '<div class="goal">' + esc(a.goal) + '</div>' : ''}\${ask}
     \${a.flags.map((f) => '<div class="askbox flag">\\u26a0 ' + esc(f) + '</div>').join('')}\${files}\${livePane}
-    <div class="kv"><span>Task id</span><span>\${esc(a.id)}</span><span>Workdir</span><span>\${esc(a.where)}</span>
+    <div class="kv"><span>Task id</span><span>\${esc(a.id)}</span>\${(a.tickets || []).length ? '<span>Tickets</span><span>' + a.tickets.map((k) => '<a class="tag jira" href="' + esc(JIRA_BROWSE + k) + '" target="_blank" rel="noopener noreferrer">' + esc(k) + '</a>').join(' ') + '</span>' : ''}<span>Workdir</span><span>\${esc(a.where)}</span>
       <span>Model</span><span>\${esc(a.model)}/\${esc(a.effort)}</span>\${a.ctxMeter ? '<span>Context</span><span>' + a.ctxMeter + '</span>' : ''}
       <span>Phase</span><span>\${esc(a.phase || '-')}</span><span>Since</span><span>\${esc(a.since)}</span>
       <span>Last active</span><span>\${a.activity ? (a.activity === 'now' ? 'now' : esc(a.activity) + ' ago') : a.closedAgo ? 'archived ' + esc(a.closedAgo) + ' ago, tab closed' : 'tab closed'}</span></div>
@@ -440,6 +455,7 @@ document.addEventListener('click', (e) => {
   const copy = e.target.closest('[data-copy]');
   if (copy) { const label = copy.textContent; navigator.clipboard?.writeText(copy.dataset.copy).then(() => { copy.textContent = 'Copied'; setTimeout(() => (copy.textContent = label), 1200); }); return; }
   if (e.target.closest('.x') || e.target.classList.contains('scrim')) return closeDrawer();
+  if (e.target.closest('.card a[href]')) return;
   const card = e.target.closest('.card');
   if (card) openDrawer(card.dataset.id);
 });
@@ -454,7 +470,8 @@ function buildPhoneFeed() {
   const top = document.createElement('div');
   top.className = 'feedtop';
   top.innerHTML = '<div class="seg">' + ['all', ...PROFILES.map((p) => p.name)].map((n, i) => '<button type="button" data-feed="' + esc(n) + '"' + (i ? '' : ' class="on"') + '>' + (n === 'all' ? 'All' : esc((PROFILES.find((p) => p.name === n) || {}).label || n)) + '</button>').join('') + '</div>'
-    + '<div class="coordrow">' + PROFILES.map((p) => '<button type="button" data-act="coordinator" data-profile="' + esc(p.name) + '">' + profileBadge(p.name) + 'Coordinator</button>').join('') + '</div>';
+    + '<div class="coordrow">' + PROFILES.map((p) => '<button type="button" data-act="coordinator" data-profile="' + esc(p.name) + '">' + profileBadge(p.name) + 'Coordinator</button>').join('')
+    + (PROFILES.some((p) => p.name === ${JSON.stringify(PRIMARY_PROFILE)}) ? '<a href="' + esc(JIRA_BOARD) + '" target="_blank" rel="noopener noreferrer">' + profileBadge(${JSON.stringify(PRIMARY_PROFILE)}) + 'My Jira board</a>' : '') + '</div>';
   const feed = document.createElement('div');
   feed.className = 'feed';
   for (const [title, statuses] of [['Needs you', ['review', 'blocked']], ['Working', ['working']], ['Done', ['done']]]) {
@@ -501,14 +518,13 @@ ${metaRefresh}
 ${faviconLink(items)}
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
-<style>${css}${ui.actionsCss}${spriteCss}${reviewsCss}${served && served.files ? filesCss : ''}</style>
+<style>${css}${ui.actionsCss}${spriteCss}${reviewsCss}${jiraCss}${served ? reviewDrawerCss : ''}${served && served.files ? filesCss : ''}</style>
 <script${nonce}>document.documentElement.style.setProperty('--shimmer-delay', -(Date.now() % ${SHIMMER_MS}) + 'ms');</script></head><body${served && served.remote ? ' class="remote"' : ''}>
 <div class="topbar"><div class="brand"><h1>Agents</h1><span class="pill">coordinator ledger + tmux</span></div><div class="right">${actions}${filesButton}<div class="meta">snapshot ${generatedAt} · reloads every ${reloadNote}</div><a class="btn" id="refresh" href="${refreshHref}">↻ Refresh</a></div></div>
 ${spriteDefsHtml(items.map((a) => spriteKind({ status: a.status, live: a.win !== '-' })))}
-${reviewsHtml(options.reviews || [], Date.now(), { served: Boolean(served) })}
-${laned ? lanesHtml(items, profiles, served) : boardHtml(items, served, '')}
+${laned ? lanesHtml(items, profiles, served, options.reviews || []) : boardHtml(items, served, '', options.reviews || [])}
 <div class="scrim"></div><aside class="drawer"></aside>${served ? '<div class="toast" role="status" aria-live="polite"></div>' : ''}
-<script${nonce}>${clientScript(items, generatedAt, profiles)}${served ? ui.actionsClientScript(served.csrf, served.replyable) : ''}</script></body></html>`;
+<script${nonce}>${clientScript(items, generatedAt, profiles)}${served ? ui.actionsClientScript(served.csrf, served.replyable) + reviewDrawerScript : ''}</script></body></html>`;
 };
 
 const writePage = (stateDir, out, options = {}) => {
