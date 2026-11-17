@@ -74,6 +74,8 @@ Usage:
       --repo <dir>           git repo to work in (default: the monorepo)
       --base <ref>           worktree start point (default: origin's default branch, fetched first)
       --branch <name>        worktree branch (default: wip/<id>); an existing local branch is checked out as-is
+      --ticket <KEY>|none    Jira ticket for the dashboard tag (repeatable); none turns off the guess
+                             from the id prefix or branch
       --cwd <dir>            run in this directory instead of creating a worktree
       --permission-mode <m>  passed through to claude
       --session <name>       tmux session (default: the caller's session)
@@ -248,7 +250,7 @@ default_base() {
 
 cmd_spawn() {
   local name="" brief="" coordinator="" id="" model="" effort="" repo="$DEFAULT_REPO" harness="$HARNESS"
-  local base="" branch="" cwd="" permission_mode="" session=""
+  local base="" branch="" cwd="" permission_mode="" session="" tickets="null" ticket
   while (($#)); do
     case "$1" in
       --name) name="$2"; shift 2 ;;
@@ -261,6 +263,15 @@ cmd_spawn() {
       --repo) repo="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
       --branch) branch="$2"; shift 2 ;;
+      --ticket)
+        ticket="${2:-}"
+        [[ $tickets == null ]] && tickets="[]"
+        if [[ $ticket != none ]]; then
+          ticket="${ticket^^}"
+          [[ $ticket =~ ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,6}$ ]] || die "--ticket takes a Jira key like TWISM-1440, or none"
+          tickets="$(jq -c --arg t "$ticket" 'if index([$t]) then . else . + [$t] end' <<<"$tickets")"
+        fi
+        shift 2 ;;
       --cwd) cwd="$2"; shift 2 ;;
       --permission-mode) permission_mode="$2"; shift 2 ;;
       --session) session="$2"; shift 2 ;;
@@ -306,10 +317,11 @@ cmd_spawn() {
     --arg repo "$repo" --arg mode "$mode" --arg workdir "$workdir" --arg base "$base" \
     --arg branch "$branch" --arg permissionMode "$permission_mode" --arg session "$session" \
     --arg coordinator "$coordinator" --arg createdAt "$(date -Iseconds)" \
-    --arg profile "$PROFILE" --arg harness "$harness" \
+    --arg profile "$PROFILE" --arg harness "$harness" --argjson tickets "$tickets" \
     '{id:$id, name:$name, model:$model, effort:$effort, repo:$repo, mode:$mode, workdir:$workdir,
       base:$base, branch:$branch, permissionMode:$permissionMode, session:$session,
-      coordinator:$coordinator, createdAt:$createdAt, profile:$profile, harness:$harness}' >"$task_dir/meta.json"
+      coordinator:$coordinator, createdAt:$createdAt, profile:$profile, harness:$harness}
+      + (if $tickets == null then {} else {tickets:$tickets} end)' >"$task_dir/meta.json"
 
   local start_dir="$repo" created window_id pane_id
   if [[ $mode == cwd ]]; then start_dir="$workdir"; fi

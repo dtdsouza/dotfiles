@@ -316,6 +316,36 @@ describe('approving a waiting review', () => {
   });
 });
 
+describe('review detail', () => {
+  const SHA = 'dc816155f198034826fd76a714ff532c80acd616';
+  const detailPath = (ref, sha) => `/api/reviews/detail?ref=${encodeURIComponent(ref)}&head_sha=${sha}`;
+
+  test('returns the panel data for a waiting review, never cached', async () => {
+    const res = await request({ urlPath: detailPath('platform/monorepo!1231', SHA), headers: goodHeaders() });
+    assert.equal(res.status, 200, res.body);
+    assert.equal(res.headers['cache-control'], 'no-store');
+    const data = res.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.ref, 'platform/monorepo!1231');
+    assert.deepEqual(data.findings, []);
+    assert.ok(!res.body.includes(env.reviewDir));
+  });
+
+  test('sits behind the read gate: cookie, token and same-origin', async () => {
+    const urlPath = detailPath('platform/monorepo!1231', SHA);
+    assert.equal((await request({ urlPath, headers: goodHeaders({ 'X-Dashboard-Token': 'nope' }) })).status, 403);
+    assert.equal((await request({ urlPath, headers: goodHeaders({ Cookie: `${COOKIE}=wrong` }) })).status, 401);
+    assert.equal((await request({ urlPath, headers: goodHeaders({ 'Sec-Fetch-Site': 'cross-site' }) })).status, 403);
+    assert.equal((await request({ urlPath, headers: goodHeaders({ Origin: 'https://evil.example' }) })).status, 403);
+  });
+
+  test('a malformed query is a 400; a stale or outside review is a 409', async () => {
+    assert.equal((await request({ urlPath: '/api/reviews/detail?ref=x', headers: goodHeaders() })).status, 400);
+    assert.equal((await request({ urlPath: detailPath('platform/monorepo!1231', 'f'.repeat(40)), headers: goodHeaders() })).status, 409);
+    assert.equal((await request({ urlPath: detailPath('platform/monorepo!66', 'aaaaaaaa11111111'), headers: goodHeaders() })).status, 409);
+  });
+});
+
 describe('helpers', () => {
   test('promptIsReady refuses a permission dialog and accepts the input box', () => {
     const rule = '─'.repeat(40);

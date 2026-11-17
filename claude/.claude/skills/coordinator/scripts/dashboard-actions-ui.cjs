@@ -8,6 +8,11 @@ const APPROVE_POLL_MS = 2000;
 const APPROVE_WAIT_MS = 3 * 60 * 1000;
 const TAP_TARGET_PX = 44;
 
+const { PRIMARY_PROFILE } = require('./profiles.cjs');
+const { JIRA_BOARD_URL } = require('./dashboard-jira.cjs');
+
+const jiraBoardLinkHtml = `<a class="btn quiet" href="${JIRA_BOARD_URL}" target="_blank" rel="noopener noreferrer">My Jira board</a>`;
+
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 const actionsCss = `.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -41,11 +46,11 @@ const actionsCss = `.actions{display:flex;align-items:center;gap:8px;flex-wrap:w
 .msg,.reply{min-height:${TAP_TARGET_PX + 6}px}.msg input,.reply input,.custom input{font-size:16px;min-height:${TAP_TARGET_PX}px}.msg .btn,.reply .btn{padding:0 16px}
 .foot{flex-wrap:wrap}.foot .acts{flex-wrap:wrap}}`;
 
-const headerActionsHtml = `<div class="actions"><form class="msg" autocomplete="off"><input name="text" maxlength="2000" placeholder="Message coordinator" aria-label="Message coordinator" enterkeyhint="send"><button class="btn" type="submit">Send</button></form><button class="btn quiet" data-act="coordinator" type="button">Coordinator</button><button class="btn quiet desktop-only" data-act="focus" type="button">Go to coordinator</button></div>`;
+const headerActionsHtml = `<div class="actions"><form class="msg" autocomplete="off"><input name="text" maxlength="2000" placeholder="Message coordinator" aria-label="Message coordinator" enterkeyhint="send"><button class="btn" type="submit">Send</button></form><button class="btn quiet" data-act="coordinator" type="button">Coordinator</button><button class="btn quiet desktop-only" data-act="focus" type="button">Go to coordinator</button>${jiraBoardLinkHtml}</div>`;
 
 // One per swimlane: every control names its profile, so nothing typed here can reach the other lane.
 const laneActionsHtml = (profile, label) =>
-  `<div class="actions"><form class="msg" data-profile="${esc(profile)}" autocomplete="off"><input name="text" maxlength="2000" placeholder="Message the ${esc(label)} coordinator" aria-label="Message the ${esc(label)} coordinator" enterkeyhint="send"><button class="btn" type="submit">Send</button></form><button class="btn quiet" data-act="coordinator" data-profile="${esc(profile)}" type="button">Coordinator</button><button class="btn quiet desktop-only" data-act="focus" data-profile="${esc(profile)}" type="button">Go to coordinator</button></div>`;
+  `<div class="actions"><form class="msg" data-profile="${esc(profile)}" autocomplete="off"><input name="text" maxlength="2000" placeholder="Message the ${esc(label)} coordinator" aria-label="Message the ${esc(label)} coordinator" enterkeyhint="send"><button class="btn" type="submit">Send</button></form><button class="btn quiet" data-act="coordinator" data-profile="${esc(profile)}" type="button">Coordinator</button><button class="btn quiet desktop-only" data-act="focus" data-profile="${esc(profile)}" type="button">Go to coordinator</button>${profile === PRIMARY_PROFILE ? jiraBoardLinkHtml : ''}</div>`;
 
 const replyFormHtml = (id) =>
   `<form class="reply" data-reply="${esc(id)}" autocomplete="off"><input name="text" maxlength="2000" placeholder="Reply to this worker" aria-label="Reply to ${esc(id)}" enterkeyhint="send"><button class="btn" type="submit">Send</button></form>`;
@@ -86,7 +91,7 @@ async function run(button, path, body, after) {
   try { toast(await act(path, body), true); if (after) after(); } catch (err) { toast(err.message, false); } finally { button.disabled = false; }
 }
 const typing = () => [...document.querySelectorAll('.msg input, .reply input')].some((i) => i === document.activeElement || i.value !== '');
-window.dashboardBusy = () => typing() || document.body.classList.contains('open') || !!document.querySelector('.armed, .rv.approving');
+window.dashboardBusy = () => typing() || document.body.classList.contains('open') || !!document.querySelector('.armed, .approving');
 const profileBody = (el, body) => (el && el.dataset.profile ? { ...body, profile: el.dataset.profile } : body);
 document.addEventListener('submit', (e) => {
   const form = e.target.closest('form.msg');
@@ -142,6 +147,7 @@ function startPeek(id) {
   peekTimer = setInterval(() => { if (!document.hidden) refreshPeek(); }, ${PEEK_POLL_MS});
 }
 function openCoordinatorDrawer(profile) {
+  if (window.dashboardLeaveReview) window.dashboardLeaveReview();
   document.querySelectorAll('.card.sel').forEach((c) => c.classList.remove('sel'));
   const peek = coordinatorPeekId(profile);
   const label = profile ? ((typeof PROFILES !== 'undefined' && PROFILES.find((p) => p.name === profile)) || { label: profile }).label + ' coordinator' : 'Coordinator';
@@ -179,17 +185,28 @@ function showApproving(button, label) {
   spin.setAttribute('aria-hidden', 'true');
   button.replaceChildren(spin, document.createTextNode(label));
 }
-function removeReviewRow(row) {
-  const section = row.closest('.reviews');
-  row.classList.add('gone');
-  setTimeout(() => {
-    row.remove();
-    if (!section) return;
-    const left = section.querySelectorAll('.rv').length;
-    if (!left) return section.remove();
-    const count = section.querySelector('.count');
-    if (count) count.textContent = String(left);
-  }, 450);
+const approveButtons = (ref, sha) => [...document.querySelectorAll('[data-approve]')].filter((b) => b.dataset.approve === ref && b.dataset.sha === sha);
+// The card and the open review drawer each carry a button for the same review; both follow one approve.
+function markApproving(ref, sha, label) {
+  approveButtons(ref, sha).forEach((b) => { b.disabled = true; (b.closest('.rvcard, .rvbar') || b).classList.add('approving'); showApproving(b, label); });
+}
+function settleApprove(ref, sha, label, enabled) {
+  approveButtons(ref, sha).forEach((b) => { b.disabled = !enabled; (b.closest('.rvcard, .rvbar') || b).classList.remove('approving'); b.textContent = label; });
+}
+function removeReview(ref, sha) {
+  const cards = [...document.querySelectorAll('.rvcard')].filter((c) => c.dataset.review === ref && c.dataset.sha === sha);
+  if (drawer.classList.contains('review') && cards.some((c) => location.hash === '#' + encodeURIComponent(c.dataset.id))) closeDrawer();
+  cards.forEach((card) => {
+    const count = card.closest('.col') && card.closest('.col').querySelector('.count');
+    card.classList.add('gone');
+    setTimeout(() => {
+      card.remove();
+      if (!count) return;
+      const left = Math.max(0, Number(count.dataset.total) - 1);
+      count.dataset.total = String(left);
+      count.textContent = String(left);
+    }, 450);
+  });
 }
 async function reviewState(ref, sha) {
   const res = await fetch('/api/reviews/status?ref=' + encodeURIComponent(ref) + '&head_sha=' + encodeURIComponent(sha), { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Dashboard-Token': CSRF } });
@@ -198,20 +215,15 @@ async function reviewState(ref, sha) {
   if (!res.ok || !data.ok) throw new Error(data.error || 'Status check failed (HTTP ' + res.status + ').');
   return data;
 }
-// The click only records the decision; the poller's tick sends it to GitLab, so the row stays until state.json says it landed.
+// The click only records the decision; the poller's tick sends it to GitLab, so the card stays until state.json says it landed.
 async function approveOnGitlab(button) {
-  const row = button.closest('.rv');
   const ref = button.dataset.approve;
   const sha = button.dataset.sha;
-  button.disabled = true;
-  row.classList.add('approving');
-  showApproving(button, 'Approving…');
+  markApproving(ref, sha, 'Approving…');
   try {
     await act('/api/reviews/approve', { ref, head_sha: sha });
   } catch (err) {
-    row.classList.remove('approving');
-    button.textContent = 'Approve';
-    button.disabled = false;
+    settleApprove(ref, sha, 'Approve', true);
     return toast(err.message, false);
   }
   toast('Approving ' + ref + ' on GitLab…', true);
@@ -220,16 +232,15 @@ async function approveOnGitlab(button) {
     await new Promise((resolve) => setTimeout(resolve, ${APPROVE_POLL_MS}));
     let data;
     try { data = await reviewState(ref, sha); } catch (err) { if (/reload/.test(err.message)) { toast(err.message, false); break; } continue; }
-    if (data.state === 'approved') { toast('Approved ' + ref + ' on GitLab', true); return removeReviewRow(row); }
-    if (data.state === 'declined') return removeReviewRow(row);
+    if (data.state === 'approved') { toast('Approved ' + ref + ' on GitLab', true); return removeReview(ref, sha); }
+    if (data.state === 'merged' || data.state === 'closed') { toast(ref + ' was ' + data.state + ' meanwhile; no approve needed.', true); return removeReview(ref, sha); }
+    if (data.state === 'declined') return removeReview(ref, sha);
     if (data.state === 'failed') {
-      row.classList.remove('approving');
-      button.textContent = 'Approve failed';
+      settleApprove(ref, sha, 'Approve failed', false);
       return toast('GitLab did not take the approve for ' + ref + (data.reason ? ': ' + data.reason : '.'), false);
     }
   }
-  row.classList.remove('approving');
-  button.textContent = 'Approve recorded';
+  settleApprove(ref, sha, 'Approve recorded', false);
   toast('Recorded; the poller approves ' + ref + ' on its next tick.', true);
 }
 document.addEventListener('click', (e) => {
@@ -246,7 +257,7 @@ document.addEventListener('click', (e) => {
   const focus = e.target.closest('[data-act="focus"]');
   if (focus) return run(focus, '/api/coordinator/focus', profileBody(focus, {}));
   const approve = e.target.closest('[data-approve]');
-  if (approve) { if (armed(approve, 'Confirm approve')) approveOnGitlab(approve); return; }
+  if (approve) { e.stopPropagation(); if (armed(approve, 'Confirm approve')) approveOnGitlab(approve); return; }
   const close = e.target.closest('[data-close]');
   if (close) { e.stopPropagation(); if (armed(close, 'Confirm close')) run(close, '/api/tabs/close', { id: close.dataset.close }, reloadSoon); return; }
   const all = e.target.closest('[data-close-all]');

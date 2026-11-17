@@ -68,6 +68,7 @@ Discovery is the default because it follows a machine rename after a restart and
   - a permission dialog or numbered menu is on screen. Answer those in the terminal: choosing from them on the phone is deliberately not supported.
 
   Replies get the same sanitizing and 2000-character cap as coordinator messages.
+- **The review panel reads, never reaches GitLab.** `GET /api/reviews/detail?ref=&head_sha=` sits behind the same read gate as peek (cookie, CSRF header, an `Origin` that must be ours if present, same-origin `Sec-Fetch-Site`, the 240-a-minute budget, `no-store`). The ref and sha must match an entry still waiting in the autoloop's `pending.json`, and its dir must resolve under the autoloop's `reviews/`. It reads only a fixed list of files there (`meta`, `findings`, `recheck`, `triage`, `posted`, `live`, and `context/` `mr.json`, `files.tsv`, `commits.txt`, `jira.md`), plus 17-line snippets from `context/files/`. The review session can write into that dir and the MR author steers it, so every file is opened only if its real path stays inside the dir (a planted symlink reads as missing), sizes are capped, the dir path is never returned, and the page renders every field as escaped text. What GitLab says now (state, head, pipeline, approvals, our threads) comes from the poller's `live.json`; the server and the phone make no GitLab call and hold no GitLab token. GitLab and Jira links on the page open in a new tab (`noopener noreferrer`); GitLab ones need the VPN.
 - **Audit log.** Every message typed into a pane (replies and coordinator messages) is appended to `~/.local/state/agentctl/dashboard-audit.jsonl` (0600) as `{at, task, source, text}`. `source` is `local` or `tailnet:<login>`.
 
 ## File viewer security model
@@ -123,5 +124,6 @@ viewer; no proxy or tailnet policy change is needed.
 
 - iOS Safari and Android Chrome keep the `SameSite=Strict` cookie after the key redirect and after a home-screen launch.
 - The keyboard does not cover the reply box, and the drawer scrolls while the peek panel refreshes.
+- The review panel opens full screen with the Approve bar pinned above the home indicator, and long findings and snippets scroll inside it (not checked in a browser yet: the headless browser does not start in the agent sandbox).
 - The page and peek keep working when the phone switches between Wi-Fi and mobile data (Tailscale reconnects).
 - Videos play and seek in the player on iOS Safari and Android Chrome. Desktop Chromium and WebKit do, through Range requests. A report opened from a home-screen launch shows in the browser's in-app view.

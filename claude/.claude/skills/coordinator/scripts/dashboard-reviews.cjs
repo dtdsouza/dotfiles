@@ -1,13 +1,15 @@
 'use strict';
 
-// "Reviews waiting on you": the posted mr-review-autoloop reviews that still need daniel.souza's approve
-// decision. pending.json is written by that skill's poller. The served page can record an approve through
+// The posted mr-review-autoloop reviews that still need daniel.souza's approve decision, shown as
+// Needs-you cards in the Twism lane. pending.json is written by that skill's poller. The served page can record an approve through
 // that skill's decide.py; the poller then approves at the reviewed head sha.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const { ActionError } = require('./dashboard-actions.cjs');
+const { PRIMARY_PROFILE } = require('./profiles.cjs');
+const { TICKET, ticketTagsHtml } = require('./dashboard-jira.cjs');
 
 const DEFAULT_FILE = path.join(os.homedir(), '.local/state/mr-review-autoloop/pending.json');
 const VERDICTS = new Set(['BLOCK_MERGE', 'REQUEST_CHANGES', 'APPROVE_WITH_NITS', 'APPROVE']);
@@ -44,34 +46,45 @@ const age = (iso, now) => {
 };
 
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const FAILED_PIPELINES = new Set(['failed', 'canceled']);
+const SHORT_SHA = 8;
 
-const reviewRowHtml = (r, now, served) => {
-  const iid = Number.isInteger(r.iid) ? r.iid : Number.parseInt(String(r.ref).split('!')[1], 10);
-  const verdict = VERDICTS.has(r.verdict) ? r.verdict : 'UNKNOWN';
-  const tier = TIERS.has(r.tier) ? r.tier : '?';
-  const posted = r.posted || {};
-  const counts = [
-    count(Number(posted.inline) || 0, 'inline', 'inline'),
-    count(Number(posted.note) || 0, 'in a note', 'in a note'),
-    count(Number(posted.local) || 0, 'kept local', 'kept local'),
-  ].join(' · ');
-  const ref = MR_URL.test(r.url || '')
-    ? `<a class="rvref" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.ref)}</a>`
-    : `<span class="rvref">${esc(r.ref)}</span>`;
-  const dry = r.dry_run ? '<span class="rvtag">dry run</span>' : '';
-  const when = r.reviewed_at ? `<span class="rvage">${esc(age(r.reviewed_at, now))}</span>` : '';
-  const decide = Number.isInteger(iid) ? `<code>approve !${iid}</code> or <code>skip !${iid}</code>` : '';
-  const approve = served && REF.test(r.ref) && HEAD_SHA.test(String(r.head_sha || ''))
-    ? `<button class="mini approve" type="button" data-approve="${esc(r.ref)}" data-sha="${esc(r.head_sha)}" title="Approve at ${esc(String(r.head_sha).slice(0, 8))}; the poller sends it to GitLab on its next tick">Approve</button>`
-    : '';
-  return `<li class="rv"><div class="rvhead">${ref}<span class="rvtag">${tier}</span><span class="rvverdict v-${verdict.toLowerCase()}">${verdict.replace(/_/g, ' ')}</span>${dry}${when}${approve}</div>`
-    + `<div class="rvtitle">${esc(r.title || '')}</div><div class="rvmeta">${counts}${decide ? ` · tell the coordinator ${decide}` : ''}</div></li>`;
+const reviewIid = (r) => (Number.isInteger(r.iid) ? r.iid : Number.parseInt(String(r.ref).split('!')[1], 10));
+const usableSha = (r) => HEAD_SHA.test(String(r.head_sha || ''));
+// The card's id doubles as the drawer's URL hash: #review/<ref>@<sha8>.
+const reviewCardId = (r) => `review/${r.ref}@${usableSha(r) ? String(r.head_sha).slice(0, SHORT_SHA) : '-'}`;
+const postedCounts = (posted = {}) =>
+  [count(Number(posted.inline) || 0, 'inline', 'inline'), count(Number(posted.note) || 0, 'in a note', 'in a note'), count(Number(posted.local) || 0, 'kept local', 'kept local')].join(' · ');
+
+// live.json is the poller's last look at GitLab; the phone cannot ask GitLab itself.
+const liveHintsHtml = (live) => {
+  if (!live || typeof live !== 'object') return '';
+  const warns = [
+    live.head_moved === true ? 'pushed since the review: Approve will be refused' : '',
+    FAILED_PIPELINES.has(live.pipeline) ? `pipeline ${live.pipeline}` : '',
+  ].filter(Boolean);
+  const approvers = Array.isArray(live.approved_by) ? live.approved_by.filter((u) => typeof u === 'string' && u) : [];
+  return warns.map((w) => `<div class="warn">${esc(w)}</div>`).join('') + (approvers.length ? `<div class="line">approved by ${esc(approvers.join(', '))}</div>` : '');
 };
 
-const reviewsHtml = (reviews, now = Date.now(), { served = false } = {}) => {
-  if (!reviews.length) return '';
-  return `<section class="reviews" aria-label="Reviews waiting on you"><div class="colhead"><span class="dot s-review"></span><h2>Reviews waiting on you</h2><span class="count">${reviews.length}</span></div>`
-    + `<ul>${reviews.map((r) => reviewRowHtml(r, now, served)).join('')}</ul></section>`;
+const reviewCardHtml = (r, now = Date.now(), { served = false, profile = PRIMARY_PROFILE } = {}) => {
+  const iid = reviewIid(r);
+  const verdict = VERDICTS.has(r.verdict) ? r.verdict : 'UNKNOWN';
+  const tier = TIERS.has(r.tier) ? r.tier : '?';
+  const mrLink = MR_URL.test(r.url || '') ? `<a class="mini" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">MR</a>` : '';
+  const tickets = ticketTagsHtml((Array.isArray(r.jira) ? r.jira : []).filter((key) => TICKET.test(String(key))));
+  const dry = r.dry_run ? '<span class="tag">dry run</span>' : '';
+  const when = r.reviewed_at ? `reviewed ${age(r.reviewed_at, now)}` : 'reviewed';
+  const approve = served && REF.test(r.ref) && usableSha(r)
+    ? `<button class="mini approve" type="button" data-approve="${esc(r.ref)}" data-sha="${esc(r.head_sha)}" title="Approve at ${esc(String(r.head_sha).slice(0, SHORT_SHA))}; the poller sends it to GitLab on its next tick">Approve</button>`
+    : '';
+  const decide = !served && Number.isInteger(iid) ? `<div class="line">tell the coordinator <code>approve !${iid}</code> or <code>skip !${iid}</code></div>` : '';
+  const sha = usableSha(r) ? ` data-review="${esc(r.ref)}" data-sha="${esc(r.head_sha)}"` : '';
+  return `<div class="card ask rvcard" data-id="${esc(reviewCardId(r))}" data-profile="${esc(profile)}"${sha} data-updated="${Math.floor((Date.parse(r.reviewed_at) || now) / 1000)}">`
+    + `<h4><span class="rvref">${esc(r.ref)}</span></h4>`
+    + `<div class="row"><span class="tag">review</span><span class="tag">${tier}</span><span class="rvverdict v-${verdict.toLowerCase()}">${verdict.replace(/_/g, ' ')}</span>${tickets}${dry}</div>`
+    + `<div class="goal">${esc(r.title || '')}</div><div class="line">${postedCounts(r.posted)}</div>${liveHintsHtml(r.live)}${decide}`
+    + `<div class="foot"><span class="age">${esc(when)}</span><span class="acts">${approve}${mrLink}</span></div></div>`;
 };
 
 const validTarget = ({ ref, head_sha: headSha }) => typeof ref === 'string' && REF.test(ref) && typeof headSha === 'string' && HEAD_SHA.test(headSha);
@@ -108,7 +121,7 @@ const approveReview = async (body, { file = reviewsFile(), command = ['python3',
   return { task: `review ${ref}`, text: `approve ${ref} at ${headSha.slice(0, 8)}`, message };
 };
 
-const STATES = { posted: 'waiting', approved: 'approved', approve_failed: 'failed', declined: 'declined' };
+const STATES = { posted: 'waiting', approved: 'approved', approve_failed: 'failed', declined: 'declined', merged: 'merged', closed: 'closed' };
 const LOG_TAIL_BYTES = 64 * 1024;
 const REASON_MAX = 300;
 
@@ -162,24 +175,16 @@ const reviewStatus = (query, { file = reviewsFile() } = {}) => {
 };
 
 const reviewsCss = `
-.reviews{margin:20px 40px 0;padding:16px 20px;border:1px solid var(--line);border-radius:24px;background:var(--soft)}
-.reviews ul{list-style:none;padding:0;margin:8px 0 0;display:grid;gap:10px}
-.rv{padding:10px 0;border-top:1px solid var(--line)}.rv:first-child{border-top:0}
-.rvhead{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
-.rvref{font:500 14px var(--mono);color:var(--green-ink)}a.rvref:hover{text-decoration:underline}
-.rvtag{font:500 11px var(--mono);padding:2px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted)}
-.rvverdict{font:600 11px var(--body);letter-spacing:.04em;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+.rvref{font:500 14px var(--mono);color:var(--green-ink);word-break:break-all}
+.rvverdict{font:600 11px/18px var(--body);letter-spacing:.04em;padding:1px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
 .v-block_merge,.v-request_changes{color:var(--red);border-color:var(--red-45)}.v-approve,.v-approve_with_nits{color:var(--green-ink);border-color:var(--green-30)}.v-unknown{color:var(--amber)}
-.rvage{margin-left:auto;font-size:12px;color:var(--muted)}
-.rv .approve{border-color:var(--green-30);color:var(--green-ink);font-weight:600;padding:3px 14px}.rv .approve:hover{border-color:var(--green-ink)}.rv .approve.armed{background:var(--green-12)}
-.rv .approve .spin{display:inline-block;width:10px;height:10px;margin-right:6px;vertical-align:-1px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:rvspin .8s linear infinite}
-.rv.approving .approve[disabled]{opacity:1;cursor:progress}
-.rv{transition:opacity .4s}.rv.gone{opacity:0}
+.rvcard .line code{font:12px var(--mono);color:var(--text)}
+.approve{border-color:var(--green-30);color:var(--green-ink);font-weight:600;padding:3px 14px}.approve:hover{border-color:var(--green-ink)}.approve.armed{background:var(--green-12)}
+.approve .spin{display:inline-block;width:10px;height:10px;margin-right:6px;vertical-align:-1px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:rvspin .8s linear infinite}
+.approving .approve[disabled]{opacity:1;cursor:progress}
+.rvcard{transition:opacity .4s}.rvcard.gone{opacity:0}
 @keyframes rvspin{to{transform:rotate(360deg)}}
-@media (prefers-reduced-motion:reduce){.rv .approve .spin{animation-duration:2.4s}.rv{transition:none}}
-.rvtitle{margin-top:4px;color:var(--fg);overflow-wrap:anywhere}
-.rvmeta{margin-top:2px;font-size:12px;color:var(--muted)}.rvmeta code{font:12px var(--mono);color:var(--text)}
-@media (max-width:640px){.reviews{margin:16px 16px 0;padding:14px;border-radius:20px}.rvage{margin-left:0}}
+@media (prefers-reduced-motion:reduce){.approve .spin{animation-duration:2.4s}.rvcard{transition:none}}
 `;
 
-module.exports = { DEFAULT_FILE, DEFAULT_DECIDE, reviewsFile, readReviews, reviewsHtml, reviewsCss, approveReview, reviewStatus };
+module.exports = { DEFAULT_FILE, DEFAULT_DECIDE, REF, HEAD_SHA, MR_URL, VERDICTS, TIERS, reviewsFile, readReviews, reviewCardHtml, reviewCardId, reviewsCss, approveReview, reviewStatus, validTarget, isInside, readJson };
