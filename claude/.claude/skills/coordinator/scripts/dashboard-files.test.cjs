@@ -412,6 +412,17 @@ describe('Files page and drawer', () => {
     assert.match(env.page.body, /<nav class="tabbar"[^]*<a href="\/files">/);
   });
 
+  test('the Files page has the rail and the phone tab bar with Files active and the other pages linked absolutely', async () => {
+    const res = await request({ urlPath: '/files', headers: withCookie() });
+    assert.match(res.body, /<nav class="rail"/);
+    assert.match(res.body, /<a class="ri on" href="\/files"/);
+    assert.match(res.body, /<a class="ri" href="\/" data-nav="agents"/);
+    assert.match(res.body, /<nav class="tabbar"[^]*<a class="on" href="\/files">/);
+    assert.match(res.body, /<a href="\/" data-nav="agents">/);
+    assert.doesNotMatch(res.body, /href="#/);
+    assert.match(res.body, /data-rail-toggle/);
+  });
+
   test('ships inline scripts that parse', async () => {
     const res = await request({ urlPath: '/files', headers: withCookie() });
     for (const body of [env.page.body, res.body]) {
