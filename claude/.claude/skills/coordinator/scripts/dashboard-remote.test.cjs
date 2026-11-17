@@ -159,12 +159,12 @@ describe('tailnet host gate', () => {
   test('serves the page through the tailnet name to the allowlisted login', async () => {
     const res = await request({ headers: without(tailnetHeaders(), 'Origin', 'Content-Type') });
     assert.equal(res.status, 200, res.body);
-    assert.match(res.body, /<body class="remote">/);
+    assert.match(res.body, /<body class="served remote">/);
   });
 
   test('keeps the local page unchanged on 127.0.0.1', () => {
     assert.equal(env.localPage.status, 200);
-    assert.doesNotMatch(env.localPage.body, /<body class="remote">/);
+    assert.doesNotMatch(env.localPage.body, /<body class="[^"]*remote/);
     assert.match(env.localPage.body, /Copy jump/);
   });
 

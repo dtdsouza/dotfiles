@@ -108,6 +108,16 @@ Each live worker card on the served page also has a reply box, which types into 
 
 The served page also has a **Files** view (`/files`): the workers' HTML reports, videos and PDFs under `~/workspace/twism/**/.claude/tmp/` and worktree `docs/`/`openspec/`, newest first, with the task each belongs to. Each drawer lists that task's files, and paths in ledger notes become links. Files open read-only through short-lived signed `/v/` links, sandboxed into an opaque origin so a report cannot drive the actions. Videos open in a seekable player. Set `COORDINATOR_DASHBOARD_FILE_ROOTS` to change the folders (or `off`); the security model is in `PHONE.md`. So a worker's report or demo can be reviewed from the phone, write it under the worktree's `.claude/tmp/<task-id>/` and name the path in the ledger note.
 
+The served page has a nav rail on the left (Agents, Files, then **My loops**). It starts collapsed to icons and the expanded state is remembered per browser. On a phone it becomes a bottom tab bar (Agents, Loops, Files). Each loop comes from a manifest in `~/.config/agentctl/loops/<id>.json`, read at server start, and has a page at `#loop/<id>` with:
+
+- its state (running, paused, timer off, error, needs you), schedule, last and next tick, and runs in flight;
+- caps used and the weekly $ against its budget (amber at 75%);
+- recent runs, errors from the last 24 h and the last 5 control actions;
+- Pause/Resume, Run now, Kill and Disable timer, each behind two clicks;
+- a settings editor driven by the manifest.
+
+The triage loop's autonomy (Automatic / Manual) is a two-click switch on its page, and its drafts are Needs-you cards with an Approve & send / Edit / Discard panel. The security model and the manifest rules are in `PHONE.md` (Loops security model). Restart the dashboard after adding a manifest.
+
 The drawer's "Open in terminal" button is a `tmuxjump://` link. It only works after the user runs `agentctl.sh install-jump-handler` once (registers a desktop URL handler that runs `scripts/tmux-jump.sh`); it opens a new terminal window on that agent's tab (a grouped tmux session that removes itself when closed) and leaves the existing terminal alone. Raising an existing window is not possible on GNOME Wayland.
 
 Done lists live tabs named `-done` plus every task archived in the last 30 days (newest first); a Today / 7 days / 30 days / All / Custom filter on that column, remembered in the browser, defaults to Today. Its cards for closed tabs get a "Resume in terminal" button: `tmuxjump://resume/<id>` runs `agentctl.sh resume <id>` in a new terminal, which opens tmux session `resume-<id>` in the task's workdir with `claude --resume <id>` (fails with a message if the worktree is gone).
