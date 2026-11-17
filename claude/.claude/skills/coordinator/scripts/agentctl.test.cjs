@@ -154,6 +154,36 @@ describe('spawn guards', () => {
   });
 });
 
+describe('spawn --ticket', () => {
+  const twismMeta = (id) => JSON.parse(fs.readFileSync(path.join(env.twismState, 'tasks', id, 'meta.json'), 'utf8'));
+  const spawnTwism = (id, extra) => agentctl(['spawn', '--name', id, ...extra, '--brief', env.brief, '--coordinator', 'c', '--cwd', env.twismRoot, '--session', 'twism']);
+
+  test('records each ticket, upper-cased, in meta.tickets', () => {
+    const r = spawnTwism('ticket-probe', ['--ticket', 'twism-21343', '--ticket', 'TWISM-1440']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(twismMeta('ticket-probe').tickets, ['TWISM-21343', 'TWISM-1440']);
+  });
+
+  test('--ticket none records an empty list, so no tag is guessed', () => {
+    const r = spawnTwism('21000-no-ticket', ['--ticket', 'none']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(twismMeta('21000-no-ticket').tickets, []);
+  });
+
+  test('without --ticket, meta has no tickets key and the dashboard derives one', () => {
+    const r = spawnTwism('plain-probe', []);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal('tickets' in twismMeta('plain-probe'), false);
+  });
+
+  test('a malformed key is refused before anything is created', () => {
+    const r = spawnTwism('bad-ticket', ['--ticket', 'TWISM-1;rm']);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /--ticket/);
+    assert.ok(!fs.existsSync(path.join(env.twismState, 'tasks', 'bad-ticket')));
+  });
+});
+
 describe('personal spawn', () => {
   test('starts a Codex worker in the personal session with Twism secrets scrubbed', async () => {
     const r = agentctl(['--profile', 'personal', 'spawn', '--name', 'sandbox-probe', '--effort', 'max', '--brief', env.brief, '--coordinator', 'c', '--cwd', path.join(env.personalWork, 'sandbox')]);
