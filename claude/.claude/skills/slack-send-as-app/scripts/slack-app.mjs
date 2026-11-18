@@ -7,6 +7,7 @@ import process from 'node:process'
 
 const SLACK_API = 'https://slack.com/api'
 export const MAX_MARKDOWN_CHARS = 12000
+export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 // The twism-triage-loop app token is reused on purpose: one Slack app, one secret.
 export const DEFAULT_TOKEN_FILES = [
@@ -16,17 +17,18 @@ export const DEFAULT_TOKEN_FILES = [
 
 const USAGE = `Usage:
   slack-app.mjs send --channel <C…|G…|D…|U…|#name> (--file <path> | stdin) [--thread-ts <ts>] [--broadcast] [--no-unfurl] [--dry-run]
+  slack-app.mjs upload --channel <C…|G…|D…|U…|#name> --path <file> [--title <t>] [--comment-file <md>] [--thread-ts <ts>] [--dry-run]
   slack-app.mjs whoami
 
 The message body is standard markdown (sent as markdown_text), read from --file or stdin.
-Prints one JSON object: { ok, channel, ts, threadTs, permalink }.`
+send prints { ok, channel, ts, threadTs, permalink }; upload prints { ok, channel, fileId, permalink }.`
 
-const VALUE_FLAGS = { '--channel': 'channel', '--thread-ts': 'threadTs', '--file': 'file' }
+const VALUE_FLAGS = { '--channel': 'channel', '--thread-ts': 'threadTs', '--file': 'file', '--path': 'path', '--title': 'title', '--comment-file': 'commentFile' }
 const BOOLEAN_FLAGS = { '--broadcast': ['broadcast', true], '--no-unfurl': ['unfurl', false], '--dry-run': ['dryRun', true] }
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv
-  const parsed = { command, channel: undefined, threadTs: undefined, file: undefined, broadcast: false, unfurl: true, dryRun: false }
+  const parsed = { command, channel: undefined, threadTs: undefined, file: undefined, path: undefined, title: undefined, commentFile: undefined, broadcast: false, unfurl: true, dryRun: false }
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i]
     if (VALUE_FLAGS[flag]) {
@@ -100,6 +102,26 @@ function slackError(method, error, needed) {
   return err
 }
 
+export function markdownToMrkdwn(markdown) {
+  return markdown
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<$2|$1>')
+    .replace(/\*\*([^*]+)\*\*/g, '*$1*')
+    .replace(/^(\s*)[-*] /gm, '$1\u2022 ')
+}
+
+export function checkUploadFile(file, { maxBytes = MAX_UPLOAD_BYTES } = {}) {
+  let stat
+  try {
+    stat = fs.statSync(file)
+  } catch (err) {
+    throw new Error(`Cannot upload ${file}: ${err.code === 'ENOENT' ? 'no such file' : err.code || err.message}`)
+  }
+  if (!stat.isFile()) throw new Error(`Cannot upload ${file}: not a regular file`)
+  if (stat.size === 0) throw new Error(`Cannot upload ${file}: file is empty`)
+  if (stat.size > maxBytes) throw new Error(`Cannot upload ${file}: ${stat.size} bytes exceeds the ${maxBytes} byte cap`)
+  return { filename: path.basename(file), size: stat.size }
+}
+
 async function callSlack(method, { token, fetchImpl, query, body }) {
   const url = `${SLACK_API}/${method}${query ? `?${new URLSearchParams(query)}` : ''}`
   const init = body
@@ -150,6 +172,40 @@ export async function sendMessage(message, { token, fetchImpl = fetch }) {
   }
 }
 
+async function resolveUploadChannel(target, { token, fetchImpl }) {
+  const id = await resolveChannel(target, { token, fetchImpl })
+  if (!/^[UW]/.test(id)) return id
+  // files.completeUploadExternal needs a conversation id, so a user id is turned into the app's DM with them (needs im:write).
+  const { json } = await callSlack('conversations.open', { token, fetchImpl, body: { users: id } })
+  return json.channel.id
+}
+
+export async function uploadFile(upload, { token, fetchImpl = fetch }) {
+  if (upload.threadTs && !/^\d+\.\d+$/.test(upload.threadTs)) throw new Error('--thread-ts must look like 1700000000.000100')
+  const { filename, size } = checkUploadFile(upload.path)
+  const bytes = fs.readFileSync(upload.path)
+  const channel = await resolveUploadChannel(upload.channel, { token, fetchImpl })
+  const query = { filename, length: String(size) }
+  const { json: slot } = await callSlack('files.getUploadURLExternal', { token, fetchImpl, query })
+  // The upload URL is pre-signed; the bearer token is deliberately not sent to it.
+  const put = await fetchImpl(slot.upload_url, { method: 'POST', body: bytes })
+  if (!put.ok) throw new Error(`slack file upload failed with HTTP ${put.status}`)
+  const body = {
+    files: [{ id: slot.file_id, title: upload.title || filename }],
+    channel_id: channel,
+    ...(upload.threadTs ? { thread_ts: upload.threadTs } : {}),
+    ...(upload.comment?.trim() ? { initial_comment: markdownToMrkdwn(upload.comment) } : {}),
+  }
+  await callSlack('files.completeUploadExternal', { token, fetchImpl, body })
+  const result = { ok: true, channel, fileId: slot.file_id }
+  try {
+    const { json } = await callSlack('files.info', { token, fetchImpl, query: { file: slot.file_id } })
+    return { ...result, permalink: json.file.permalink }
+  } catch (err) {
+    return { ...result, permalink: null, permalinkError: err.message }
+  }
+}
+
 export async function describeApp({ token, fetchImpl = fetch }) {
   const { json: auth, headers } = await callSlack('auth.test', { token, fetchImpl })
   const scopes = (headers.get('x-oauth-scopes') || '').split(',').map((s) => s.trim()).filter(Boolean)
@@ -172,6 +228,21 @@ export async function main(argv = process.argv.slice(2)) {
     const message = { channel: args.channel, markdown: readBody(args.file), threadTs: args.threadTs, broadcast: args.broadcast, unfurl: args.unfurl }
     if (args.dryRun) return buildPostPayload(message)
     return sendMessage(message, { token: loadBotToken() })
+  }
+  if (args.command === 'upload') {
+    const upload = {
+      channel: args.channel,
+      path: args.path,
+      title: args.title,
+      threadTs: args.threadTs,
+      comment: args.commentFile ? fs.readFileSync(args.commentFile, 'utf8') : undefined,
+    }
+    if (!upload.path) throw new Error('--path is required')
+    if (args.dryRun) {
+      const { filename, size } = checkUploadFile(upload.path)
+      return { dryRun: true, channel: upload.channel, filename, size, title: upload.title || filename, threadTs: upload.threadTs || null, comment: upload.comment ? markdownToMrkdwn(upload.comment) : null }
+    }
+    return uploadFile(upload, { token: loadBotToken() })
   }
   if (args.command === 'whoami') return describeApp({ token: loadBotToken() })
   throw new Error(USAGE)

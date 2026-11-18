@@ -11,6 +11,10 @@ import {
   sendMessage,
   describeApp,
   MAX_MARKDOWN_CHARS,
+  MAX_UPLOAD_BYTES,
+  markdownToMrkdwn,
+  checkUploadFile,
+  uploadFile,
 } from './slack-app.mjs'
 
 const BOT = 'xoxb-test-not-real'
@@ -18,12 +22,14 @@ const BOT = 'xoxb-test-not-real'
 function fakeFetch(routes) {
   const calls = []
   const impl = async (url, init = {}) => {
-    const method = new URL(url).pathname.replace('/api/', '')
+    const method = new URL(url).pathname.replace(/^\/(api\/)?/, '')
     calls.push({ method, url, init })
     const route = routes[method]
     if (!route) throw new Error(`unexpected call ${method}`)
     const { body, headers = {} } = typeof route === 'function' ? route(url, init) : route
     return {
+      ok: true,
+      status: 200,
       json: async () => body,
       headers: { get: (k) => headers[k.toLowerCase()] ?? null },
     }
@@ -49,6 +55,9 @@ describe('parseArgs', () => {
       channel: 'C123',
       threadTs: '1.2',
       file: 'm.md',
+      path: undefined,
+      title: undefined,
+      commentFile: undefined,
       broadcast: true,
       unfurl: false,
       dryRun: false,
@@ -287,5 +296,171 @@ describe('describeApp', () => {
       channels: [{ id: 'C1', name: 'bug-reports', private: false }],
       channelsError: null,
     })
+  })
+})
+
+describe('parseArgs for upload', () => {
+  test('parses upload flags', () => {
+    // Act
+    const result = parseArgs(['upload', '--channel', 'U1', '--path', 'a.mp4', '--title', 'Demo', '--comment-file', 'c.md', '--thread-ts', '1.2', '--dry-run'])
+
+    // Assert
+    assert.equal(result.command, 'upload')
+    assert.equal(result.path, 'a.mp4')
+    assert.equal(result.title, 'Demo')
+    assert.equal(result.commentFile, 'c.md')
+    assert.equal(result.threadTs, '1.2')
+    assert.equal(result.dryRun, true)
+  })
+})
+
+describe('markdownToMrkdwn', () => {
+  test('converts links and bold, keeps italics and bullets', () => {
+    // Act
+    const out = markdownToMrkdwn('**Hi** _there_\n- see [MR](https://x.y/1)')
+
+    // Assert
+    assert.equal(out, '*Hi* _there_\n\u2022 see <https://x.y/1|MR>')
+  })
+})
+
+describe('checkUploadFile', () => {
+  test('returns name and size for a regular file', () => {
+    // Arrange
+    const file = path.join(tmpDir(), 'a.txt')
+    fs.writeFileSync(file, 'hello')
+
+    // Act
+    const info = checkUploadFile(file)
+
+    // Assert
+    assert.deepEqual(info, { filename: 'a.txt', size: 5 })
+  })
+
+  test('refuses directories and missing paths', () => {
+    assert.throws(() => checkUploadFile(tmpDir()), /not a regular file/)
+    assert.throws(() => checkUploadFile(path.join(tmpDir(), 'nope')), /not a regular file|no such file/i)
+  })
+
+  test('refuses empty files and files over the cap', () => {
+    // Arrange
+    const empty = path.join(tmpDir(), 'e.txt')
+    fs.writeFileSync(empty, '')
+
+    // Act + Assert
+    assert.throws(() => checkUploadFile(empty), /empty/)
+    assert.throws(() => checkUploadFile(empty, { maxBytes: -1 }), /empty|exceeds/)
+    const big = path.join(tmpDir(), 'b.txt')
+    fs.writeFileSync(big, 'abcdef')
+    assert.throws(() => checkUploadFile(big, { maxBytes: 3 }), /exceeds the 3 byte cap/)
+    assert.ok(MAX_UPLOAD_BYTES <= 200 * 1024 * 1024)
+  })
+})
+
+describe('uploadFile', () => {
+  function uploadRoutes(extra = {}) {
+    return {
+      'files.getUploadURLExternal': { body: { ok: true, upload_url: 'https://files.slack.com/upload/v1/abc', file_id: 'F1' } },
+      'upload/v1/abc': { body: {} },
+      'files.completeUploadExternal': { body: { ok: true, files: [{ id: 'F1', title: 'Demo' }] } },
+      'files.info': { body: { ok: true, file: { permalink: 'https://twism.slack.com/files/U1/F1/a.txt' } } },
+      ...extra,
+    }
+  }
+
+  test('runs the three-step flow and returns the permalink', async () => {
+    // Arrange
+    const file = path.join(tmpDir(), 'a.txt')
+    fs.writeFileSync(file, 'hello')
+    const { impl, calls } = fakeFetch(uploadRoutes())
+
+    // Act
+    const result = await uploadFile(
+      { channel: 'C1', path: file, title: 'Demo', comment: 'see [MR](https://x.y/1)', threadTs: '1.2' },
+      { token: BOT, fetchImpl: impl },
+    )
+
+    // Assert
+    assert.deepEqual(result, { ok: true, channel: 'C1', fileId: 'F1', permalink: 'https://twism.slack.com/files/U1/F1/a.txt' })
+    assert.deepEqual(calls.map((c) => c.method), ['files.getUploadURLExternal', 'upload/v1/abc', 'files.completeUploadExternal', 'files.info'])
+    const query = new URL(calls[0].url).searchParams
+    assert.equal(query.get('filename'), 'a.txt')
+    assert.equal(query.get('length'), '5')
+    assert.equal(calls[1].init.method, 'POST')
+    assert.equal(Buffer.from(calls[1].init.body).toString(), 'hello')
+    assert.equal(calls[1].init.headers?.Authorization, undefined)
+    assert.deepEqual(JSON.parse(calls[2].init.body), {
+      files: [{ id: 'F1', title: 'Demo' }],
+      channel_id: 'C1',
+      thread_ts: '1.2',
+      initial_comment: 'see <https://x.y/1|MR>',
+    })
+  })
+
+  test('opens a DM first when the target is a user id', async () => {
+    // Arrange
+    const file = path.join(tmpDir(), 'a.txt')
+    fs.writeFileSync(file, 'hi')
+    const { impl, calls } = fakeFetch(uploadRoutes({ 'conversations.open': { body: { ok: true, channel: { id: 'D9' } } } }))
+
+    // Act
+    const result = await uploadFile({ channel: 'U1', path: file }, { token: BOT, fetchImpl: impl })
+
+    // Assert
+    assert.equal(result.channel, 'D9')
+    assert.equal(calls[0].method, 'conversations.open')
+    assert.deepEqual(JSON.parse(calls.find((c) => c.method === 'files.completeUploadExternal').init.body), {
+      files: [{ id: 'F1', title: 'a.txt' }],
+      channel_id: 'D9',
+    })
+  })
+
+  test('still succeeds when only the permalink lookup fails', async () => {
+    // Arrange
+    const file = path.join(tmpDir(), 'a.txt')
+    fs.writeFileSync(file, 'hi')
+    const { impl } = fakeFetch(uploadRoutes({ 'files.info': { body: { ok: false, error: 'missing_scope', needed: 'files:read' } } }))
+
+    // Act
+    const result = await uploadFile({ channel: 'C1', path: file }, { token: BOT, fetchImpl: impl })
+
+    // Assert
+    assert.equal(result.ok, true)
+    assert.equal(result.permalink, null)
+    assert.match(result.permalinkError, /files:read/)
+  })
+
+  test('surfaces missing_scope with the needed scope', async () => {
+    // Arrange
+    const file = path.join(tmpDir(), 'a.txt')
+    fs.writeFileSync(file, 'hi')
+    const { impl } = fakeFetch(uploadRoutes({ 'files.getUploadURLExternal': { body: { ok: false, error: 'missing_scope', needed: 'files:write' } } }))
+
+    // Act + Assert
+    await assert.rejects(uploadFile({ channel: 'C1', path: file }, { token: BOT, fetchImpl: impl }), /missing_scope \(needs files:write\)/)
+  })
+
+  test('fails clearly when the byte upload is rejected, without leaking the token', async () => {
+    // Arrange
+    const file = path.join(tmpDir(), 'a.txt')
+    fs.writeFileSync(file, 'hi')
+    const { impl } = fakeFetch(uploadRoutes())
+    const failing = async (url, init) => {
+      const res = await impl(url, init)
+      return url.includes('/upload/v1/') ? { ...res, ok: false, status: 500 } : res
+    }
+
+    // Act
+    const err = await uploadFile({ channel: 'C1', path: file }, { token: BOT, fetchImpl: failing }).catch((e) => e)
+
+    // Assert
+    assert.match(err.message, /upload.*500/i)
+    assert.equal(err.message.includes(BOT), false)
+  })
+
+  test('rejects a thread-ts that is not a message timestamp', async () => {
+    const file = path.join(tmpDir(), 'a.txt')
+    fs.writeFileSync(file, 'hi')
+    await assert.rejects(uploadFile({ channel: 'C1', path: file, threadTs: 'abc' }, { token: BOT, fetchImpl: fakeFetch({}).impl }), /thread-ts/)
   })
 })
