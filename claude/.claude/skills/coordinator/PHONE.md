@@ -4,7 +4,7 @@ The served dashboard (`agentctl.sh dashboard --serve`, `127.0.0.1:47317`) can be
 
 On the phone, each live worker card has a **reply box** (types into that worker's Claude prompt, prefixed `[via dashboard]`) and a **Peek** button (the drawer shows the last 60 lines of that worker's pane, refreshed every 3 s while open). The **Coordinator** button in the header opens the same drawer for the coordinator, so its answers to your messages can be read on the phone. Copy jump, Open in terminal and Go to coordinator are hidden there: they only make sense on the PC.
 
-The **Files** button in the header lists the workers' HTML reports, videos and PDFs, newest first, with the task each belongs to. Each task's drawer lists its own files, and the artifact paths in its ledger notes (`file://...`, `~/...`, `.claude/tmp/...`) become links. A file opens in a new tab: HTML as the report itself, a video in a player page (`<video controls playsinline>`, seekable), Markdown as plain text.
+The **Files** entry in the nav rail (desktop) or the bottom tab bar (phone) lists the workers' HTML reports, videos and PDFs, newest first, with the task each belongs to. Each task's drawer lists its own files, and the artifact paths in its ledger notes (`file://...`, `~/...`, `.claude/tmp/...`) become links. A file opens in a new tab: HTML as the report itself, a video in a player page (`<video controls playsinline>`, seekable), Markdown as plain text.
 
 ## One-time setup
 

@@ -7,6 +7,7 @@ const { findNoteRefs, resolveCandidate, collectMentions, createAttribution } = r
 const { viewHref } = require('./dashboard-files-serve.cjs');
 const { fileProfileOf, scopePolicy } = require('./dashboard-files-policy.cjs');
 const { PRIMARY_PROFILE, taskKey } = require('./profiles.cjs');
+const { railHtml, tabBarHtml, shellCss, railToggleScript } = require('./dashboard-shell-ui.cjs');
 
 const FILES_PAGE_LIMIT = 300;
 const DRAWER_FILES_LIMIT = 20;
@@ -161,7 +162,7 @@ apply();
 
 // baseCss is the dashboard's own stylesheet, so the page shares its palette and light mode.
 // initialProfile must already be a known profile name (the server validates it) or empty.
-const filesPageHtml = ({ stateDir, profiles: given, policy, index, signer, nonce, baseCss, remote, initialProfile = '' }) => {
+const filesPageHtml = ({ stateDir, profiles: given, policy, index, signer, nonce, baseCss, remote, initialProfile = '', loops = [] }) => {
   const profiles = given || [{ name: PRIMARY_PROFILE, label: 'Twism', stateDir }];
   const attribute = createProfileAttribution(profiles, policy);
   const files = index.list().slice(0, FILES_PAGE_LIMIT);
@@ -179,11 +180,14 @@ const filesPageHtml = ({ stateDir, profiles: given, policy, index, signer, nonce
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Files · Agents</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@600&display=swap" rel="stylesheet">
-<style>${baseCss}${filesCss}</style></head><body${remote ? ' class="remote"' : ''}>
-<div class="topbar"><div class="brand"><h1>Files</h1><span class="pill">${files.length} newest reports, videos and PDFs</span></div><div class="right"><a class="btn" href="/">← Agents</a></div></div>
+<style>${baseCss}${shellCss}${filesCss}</style></head><body class="served${remote ? ' remote' : ''}">
+<div class="shell">${railHtml({ loops, files: true, page: 'files' })}<div class="main">
+<div class="topbar"><div class="brand"><h1>Files</h1><span class="pill">${files.length} newest reports, videos and PDFs</span></div></div>
 <div class="fbar">${chips}<input type="search" placeholder="Filter by name, folder or task" aria-label="Filter files"></div>
 <div class="flist">${files.map((f) => filesPageRow(fileRow(signer, f), attribute(f), fileProfileOf(f.real, policy), profiles)).join('')}<div class="empty" hidden>No files match.</div></div>
-<script nonce="${nonce}">${filesPageScript(initialProfile)}</script></body></html>`;
+</div></div>${tabBarHtml({ loops, files: true, page: 'files' })}
+<script nonce="${nonce}">${filesPageScript(initialProfile)}</script>
+<script nonce="${nonce}">${railToggleScript}</script></body></html>`;
 };
 
 module.exports = { filesCss, createProfileAttribution, decorateItems, filesPageHtml };

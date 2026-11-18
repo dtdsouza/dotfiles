@@ -308,6 +308,8 @@ const keyCookie = (key, secure) => `${COOKIE}=${key}; HttpOnly; SameSite=Strict;
 
 // Opening the list mints view links, so it takes the cookie and refuses a navigation that another
 // site (or a sandboxed report, which counts as one) started.
+const loopLinksOf = (context) => (context.loops ? context.loops.loops.map((l) => ({ id: l.id, name: l.name, icon: l.icon })) : []);
+
 const handleFilesPage = (req, res, context) => {
   const { files } = context;
   if (!files) return send(res, 404, 'Not found');
@@ -318,7 +320,7 @@ const handleFilesPage = (req, res, context) => {
   const requested = context.url.searchParams.get('profile');
   if (requested !== null && requested !== 'all' && !context.profiles.some((p) => p.name === requested)) return send(res, 400, 'Unknown profile.');
   const nonce = crypto.randomBytes(16).toString('base64');
-  const html = filesPageHtml({ stateDir: context.stateDir, profiles: context.profiles, ...files, nonce, baseCss: css, remote: context.via === 'tailnet', initialProfile: requested || '' });
+  const html = filesPageHtml({ stateDir: context.stateDir, profiles: context.profiles, ...files, nonce, baseCss: css, remote: context.via === 'tailnet', initialProfile: requested || '', loops: loopLinksOf(context) });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });
 };
 
@@ -360,7 +362,7 @@ const handlePage = (req, res, context) => {
     const own = allItems.filter((item) => item.profile === profile.name);
     return context.files ? decorateItems(own, { stateDir: profile.stateDir, ...context.files, profile: profile.name }) : own;
   });
-  const loops = context.loops ? context.loops.loops.map((l) => ({ id: l.id, name: l.name, icon: l.icon })) : [];
+  const loops = loopLinksOf(context);
   const drafts = context.loops ? context.loops.allDrafts().map(({ loop, draft }) => ({ loop: loop.id, draft })) : [];
   const html = render(items, { served: { ...served, loops }, profiles: context.profiles, reviews: readReviews(context.reviews.file), drafts });
   return send(res, 200, html, { 'Content-Security-Policy': pageCsp(nonce) });

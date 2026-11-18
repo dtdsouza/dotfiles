@@ -19,21 +19,25 @@ const ICONS = {
 };
 const iconOf = (name) => ICONS[name] || ICONS.loop;
 
-const railHtml = ({ loops = [], files = false, needsYou = 0 }) => {
+// page 'files' is a separate document: the board's hash routes become links back to '/', and Files
+// is the active entry.
+const hrefOf = (page, hash) => (page === 'files' ? `/${hash}` : hash || '#');
+
+const railHtml = ({ loops = [], files = false, needsYou = 0, page = 'board' }) => {
   const loopLinks = loops
-    .map((l) => `<a class="ri" href="#loop/${esc(l.id)}" data-loop-link="${esc(l.id)}" title="${esc(l.name)}">${iconOf(l.icon)}<i class="ldot" data-dot="unknown"></i><span class="rl"><span>${esc(l.name)}</span><small class="rsub" data-loop-sub="${esc(l.id)}"></small></span></a>`)
+    .map((l) => `<a class="ri" href="${hrefOf(page, `#loop/${esc(l.id)}`)}" data-loop-link="${esc(l.id)}" title="${esc(l.name)}">${iconOf(l.icon)}<i class="ldot" data-dot="unknown"></i><span class="rl"><span>${esc(l.name)}</span><small class="rsub" data-loop-sub="${esc(l.id)}"></small></span></a>`)
     .join('');
   return `<nav class="rail" aria-label="Main">`
-    + `<a class="ri" href="#" data-nav="agents" title="Agents">${ICONS.agents}<span class="rl"><span>Agents</span></span>${needsYou ? `<b class="rc">${needsYou}</b>` : ''}</a>`
-    + (files ? `<a class="ri" href="/files" title="Files">${ICONS.files}<span class="rl"><span>Files</span></span></a>` : '')
+    + `<a class="ri" href="${hrefOf(page, '')}" data-nav="agents" title="Agents">${ICONS.agents}<span class="rl"><span>Agents</span></span>${needsYou ? `<b class="rc">${needsYou}</b>` : ''}</a>`
+    + (files ? `<a class="ri${page === 'files' ? ' on' : ''}" href="/files" title="Files">${ICONS.files}<span class="rl"><span>Files</span></span></a>` : '')
     + (loops.length ? `<div class="rsec"><span>My loops</span></div>${loopLinks}<div class="rfoot" data-loops-total></div>` : '')
     + `<button class="ri rtoggle" type="button" data-rail-toggle title="Expand or collapse">${ICONS.collapse}<span class="rl"><span>Collapse</span></span></button></nav>`;
 };
 
-const tabBarHtml = ({ loops = [], files = false }) =>
-  `<nav class="tabbar" aria-label="Main"><a href="#" data-nav="agents">${ICONS.agents}<span>Agents</span></a>`
-  + (loops.length ? `<a href="#loops" data-nav="loops">${ICONS.loops}<span>Loops</span><i class="tdot" hidden></i></a>` : '')
-  + (files ? `<a href="/files">${ICONS.files}<span>Files</span></a>` : '')
+const tabBarHtml = ({ loops = [], files = false, page = 'board' }) =>
+  `<nav class="tabbar" aria-label="Main"><a href="${hrefOf(page, '')}" data-nav="agents">${ICONS.agents}<span>Agents</span></a>`
+  + (loops.length ? `<a href="${hrefOf(page, '#loops')}" data-nav="loops">${ICONS.loops}<span>Loops</span><i class="tdot" hidden></i></a>` : '')
+  + (files ? `<a${page === 'files' ? ' class="on"' : ''} href="/files">${ICONS.files}<span>Files</span></a>` : '')
   + '</nav>';
 
 const shellCss = `
@@ -62,7 +66,7 @@ body.served{padding-bottom:72px}.toast{bottom:84px}body.open .tabbar{display:non
 
 // Routing is by hash: '' the board, #loops the loop list, #loop/<id> one loop. Drawer hashes
 // (task ids, #review/..., #draft/...) leave the board showing underneath.
-const shellScript = `
+const railToggleScript = `
 const RAIL_KEY = ${JSON.stringify(RAIL_KEY)};
 const readRail = () => { try { return localStorage.getItem(RAIL_KEY) === '1'; } catch (_) { return false; } };
 document.body.classList.toggle('rail-open', readRail());
@@ -72,6 +76,10 @@ document.addEventListener('click', (e) => {
   document.body.classList.toggle('rail-open', open);
   try { localStorage.setItem(RAIL_KEY, open ? '1' : '0'); } catch (_) {}
 });
+`;
+
+const shellScript = `
+${railToggleScript}
 const viewOfHash = () => { const h = decodeURIComponent(location.hash.slice(1)); if (h === 'loops') return { view: 'loops' }; if (h.startsWith('loop/')) return { view: 'loop', id: h.slice(5) }; return { view: 'board' }; };
 function markNav(route) {
   document.querySelectorAll('.rail .ri[data-nav], .rail .ri[data-loop-link]').forEach((a) => a.classList.toggle('on', route.view === 'board' ? a.dataset.nav === 'agents' : a.dataset.loopLink === route.id));
@@ -92,4 +100,4 @@ window.addEventListener('hashchange', applyRoute);
 applyRoute();
 `;
 
-module.exports = { ICONS, iconOf, railHtml, tabBarHtml, shellCss, shellScript };
+module.exports = { ICONS, iconOf, railHtml, tabBarHtml, shellCss, shellScript, railToggleScript };

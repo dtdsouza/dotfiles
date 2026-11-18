@@ -26,3 +26,12 @@ test('the file:// copy keeps the plain layout without loops', () => {
   const html = render([], { drafts: [{ loop: 'triage', draft }] });
   assert.doesNotMatch(html, /class="rail"|class="tabbar"|data-loop-link|dfcard/);
 });
+
+test('the Files page rail links the loops through the board route and marks Files active', () => {
+  const { railHtml, tabBarHtml } = require('./dashboard-shell-ui.cjs');
+  const loops = [{ id: 'triage', name: 'CX/bug triage', icon: 'bug' }];
+  const rail = railHtml({ loops, files: true, page: 'files' });
+  assert.match(rail, /href="\/#loop\/triage"/);
+  assert.doesNotMatch(rail, /class="ri on"[^>]*data-nav="agents"/);
+  assert.match(tabBarHtml({ loops, files: true, page: 'files' }), /<a href="\/#loops" data-nav="loops">/);
+});
